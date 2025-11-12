@@ -11,6 +11,7 @@ import folium
 from shapely.geometry import Point, LineString
 import geopandas as gpd
 import numpy as np
+from networkx.exception import NetworkXNoPath
 
 app = Flask(__name__)
 
@@ -673,11 +674,26 @@ def serve_map():
         if ong_cercana:
             try:
                 dest_point = (ong_cercana['lat'], ong_cercana['lon'])
-                distance_km = ong_cercana['distancia']
-                buffer_m = (distance_km + 2) * 1000
+                # 1. Definir el bounding box (rectángulo)
+                north = max(lat, dest_point[0])
+                south = min(lat, dest_point[0])
+                east = max(lon, dest_point[1])
+                west = min(lon, dest_point[1])
                 
-                print(f"🗺️ Descargando grafo OSMnx (buffer: {buffer_m}m)...")
-                G = ox.graph_from_point(start_point, dist=buffer_m, network_type="drive")
+                # 2. Añadir un pequeño margen (padding) de aprox. 1.1km
+                padding = 0.01 
+                
+                print(f"🗺️ Descargando grafo OSMnx desde Bounding Box...")
+                
+                # 3. Descargar solo ese rectángulo (mucho más rápido)
+                G = ox.graph_from_bbox(
+                    north + padding, 
+                    south - padding, 
+                    east + padding, 
+                    west - padding, 
+                    network_type="drive"
+                )
+                print("✅ Grafo descargado")
                 
                 orig_node = ox.distance.nearest_nodes(G, lon, lat)
                 dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
@@ -739,9 +755,11 @@ def serve_map():
                 
                 # --- FIN DE LA LÓGICA DE SEGMENTACIÓN ---
 
+            except NetworkXNoPath:
+                print(f"❌ NO SE ENCONTRÓ RUTA. Es posible que los puntos no estén conectados por calles.")
+                segmentos_ruta = [] 
             except Exception as e:
                 print(f"❌ Error al calcular la ruta: {e}")
-                # Si falla el cálculo de ruta, al menos mostrar el mapa
                 segmentos_ruta = []
         
         # 5. Generar y devolver el HTML del mapa
