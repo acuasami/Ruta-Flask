@@ -686,16 +686,11 @@ def serve_map():
                 print(f"🗺️ Descargando grafo OSMnx desde Bounding Box...")
                 
                 # 3. Descargar solo ese rectángulo (mucho más rápido)
-                bbox_con_padding = (
-                    west - padding,   # left (oeste)
-                    south - padding,  # bottom (sur)
-                    east + padding,   # right (este)
-                    north + padding   # top (norte)
-                )
-
-                # 4. Descargar solo ese rectángulo usando el parámetro 'bbox'
                 G = ox.graph_from_bbox(
-                    bbox=bbox_con_padding, 
+                    north + padding, 
+                    south - padding, 
+                    east + padding, 
+                    west - padding, 
                     network_type="drive"
                 )
                 print("✅ Grafo descargado")
