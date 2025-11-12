@@ -1,0 +1,14 @@
+pandas==2.2.3
+osmnx==1.9.4
+networkx==3.3
+shapely==2.0.4
+matplotlib==3.9.2
+geopy==2.4.1
+folium==0.17.0
+psycopg2-binary==2.9.9
+Flask==2.3.3
+
+
+
+
+
