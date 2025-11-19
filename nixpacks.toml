@@ -1,14 +1,14 @@
-# nixpacks.toml (Ajustado para Python 3.9)
 [phases.setup]
-# Usamos NixPkgs para incluir los paquetes base
+# Usamos NixPkgs para asegurar que GDAL y GEOS estén instalados
 nixPkgs = [
   "gdal",    
   "geos"
 ]
 
 [phases.install]
-# Usamos el comando de instalación estándar
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "gunicorn --bind 0.0.0.0:$PORT app:app --workers 1"
+# ✅ SOLUCIÓN CRÍTICA: Configuramos la variable de ruta de librerías (LD_LIBRARY_PATH)
+# para que Gunicorn pueda encontrar las dependencias de GDAL/GEOS en tiempo de ejecución.
+cmd = "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${NIX_BUILD_TOP}/lib/ && gunicorn --bind 0.0.0.0:$PORT app:app --workers 1"
