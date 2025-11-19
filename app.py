@@ -1,15 +1,21 @@
+from flask import Flask, request, render_template, url_for, redirect, jsonify, Response
 import os
-import networkx as nx
-import osmnx as ox
+import math
 import pandas as pd
-from flask import Flask, render_template, request, url_for, redirect, jsonify, Response
-from sqlalchemy import create_engine, text
-from folium.plugins import MarkerCluster
+import osmnx as ox
+import networkx as nx
+import re
+import psycopg2
+from geopy.distance import geodesic
 import folium
-import json
-import io
+from folium.plugins import MarkerCluster
+from shapely.geometry import Point, LineString
 import geopandas as gpd
-from shapely.geometry import Point
+import numpy as np
+from networkx.exception import NetworkXNoPath
+from sqlalchemy import create_engine, text
+import sys 
+import io 
 
 app = Flask(__name__)
 
@@ -24,7 +30,7 @@ if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
     # 2. Agregar sslmode=require al final
     FINAL_DATABASE_URL = base_url_only + "?sslmode=require"
 elif not DATABASE_URL:
-    # Fallback para desarrollo local si la variable de entorno no está configurada
+    # Fallback para desarrollo local si la variable de entorno no está establecida
     FINAL_DATABASE_URL = "postgresql://user:password@localhost:5432/mydatabase"
 else:
     # Usar la URL tal cual si no es PostgreSQL o tiene otro formato
@@ -33,6 +39,35 @@ else:
 # Crear el motor de SQLAlchemy
 engine = create_engine(FINAL_DATABASE_URL)
 # -----------------------------------------------------------------------------
+
+# Funciones de lógica (sin cambios aquí)
+def cargar_waypoints_ongs():
+    # ... (Tu función completa de cargar_waypoints_ongs aquí)
+    pass 
+
+def cargar_datos_riesgo():
+    # ... (Tu función completa de cargar_datos_riesgo aquí)
+    pass
+
+def ong_mas_cercana(pos_actual, waypoints):
+    # ... (Tu función completa de ong_mas_cercana aquí)
+    pass
+
+def find_sorted_ongs(start, waypoints_list):
+    # ... (Tu función completa de find_sorted_ongs aquí)
+    pass
+
+def haversine_heuristic(u, v, G):
+    # ... (Tu función completa de haversine_heuristic aquí)
+    pass
+
+def obtener_municipio_por_proximidad(lat, lon, waypoints):
+    # ... (Tu función completa de obtener_municipio_por_proximidad aquí)
+    pass
+
+def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segmentos_ruta, waypoints, id_usuario, colores_riesgo, ongs_cercanas, siguiente_recomendacion):
+    # ... (Tu función completa de generar_mapa_movil_con_recomendaciones aquí)
+    pass
 
 
 @app.route('/')
@@ -46,7 +81,7 @@ def login():
 
     try:
         with engine.connect() as connection:
-            # Buscar el usuario y la contraseña en la tabla 'usuarios'
+            # Consulta para buscar el usuario
             query = text("SELECT id_usuario FROM usuarios WHERE usuario = :usuario AND password = :password")
             result = connection.execute(query, {"usuario": usuario, "password": password}).fetchone()
 
@@ -57,7 +92,7 @@ def login():
             else:
                 return render_template('login.html', error="Usuario o contraseña incorrectos")
     except Exception as e:
-        # Enviar un mensaje de error legible al cliente
+        # Esto envía un mensaje legible si la BD falla (Error 500)
         print(f"Error al intentar conectar o ejecutar la consulta: {e}")
         return jsonify({"error_code": "DB_CONNECTION_FAILED", "message": f"Error de conexión o consulta a la BD: {e}"}), 500
 
@@ -69,7 +104,6 @@ def mapa():
     id_usuario = request.args.get('id_usuario', type=int)
 
     if lat is None or lon is None or id_usuario is None:
-        # Si faltan parámetros, regresa un error o redirige al login
         return render_template('login.html', error="Faltan parámetros de ubicación o ID de usuario.")
 
     # 1. Obtener datos de la base de datos (puntos de interés)
@@ -106,12 +140,7 @@ def mapa():
             icon=folium.Icon(color='blue', icon='info-sign')
         ).add_to(marker_cluster)
 
-    # 4. Generar la ruta óptima (opcional, si es necesario, actualmente comentado)
-    # G = ox.graph_from_point((lat, lon), dist=1000, network_type="drive")
-    # ... (código de ruteo) ...
-
-    # 5. Renderizar el mapa a HTML
-    # Guardar el mapa en un objeto IO para pasarlo al HTML
+    # 4. Renderizar el mapa a HTML
     data = io.BytesIO()
     m.save(data, close_file=False)
     mapa_html = data.getvalue().decode('utf-8')
@@ -119,8 +148,5 @@ def mapa():
     # Renderizar la plantilla HTML con el mapa
     return render_template('ruta_movil_1.html', mapa_html=mapa_html)
 
-
-if __name__ == '__main__':
-    # Usar puerto de Railway si está disponible, sino usar 5000
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+# --- Bloque de ejecución final eliminado, ya que Gunicorn lo maneja ---
+# El servidor ahora se inicia con el Procfile: web: gunicorn --bind 0.0.0.0:$PORT app:app --workers 1
