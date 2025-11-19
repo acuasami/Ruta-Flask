@@ -17,14 +17,14 @@ CORS(app)
 # --- 1. CONFIGURACIÓN DE BASE DE DATOS ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
-    base_url_only = DATABASE_URL.split('?')[0]
-    FINAL_DATABASE_URL = base_url_only + "?sslmode=require"
-elif not DATABASE_URL:
-    # Fallback local
-    FINAL_DATABASE_URL = "postgresql://user:password@localhost:5432/mydatabase"
-else:
+# Si la variable de entorno existe (Render), la usamos directamente.
+if DATABASE_URL:
     FINAL_DATABASE_URL = DATABASE_URL
+# Si no existe (fallback para pruebas locales), usamos el valor por defecto.
+else:
+    FINAL_DATABASE_URL = "postgresql://user:password@localhost:5432/mydatabase"
+    
+engine = create_engine(FINAL_DATABASE_URL) # La línea que usa 'engine' queda igual
 
 engine = create_engine(FINAL_DATABASE_URL)
 
@@ -264,3 +264,4 @@ def mapa():
     except Exception as e:
         print(f"💥 Error fatal: {e}")
         return f"Error del servidor: {e}", 500
+
