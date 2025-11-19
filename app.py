@@ -21,6 +21,7 @@ if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
     base_url_only = DATABASE_URL.split('?')[0]
     FINAL_DATABASE_URL = base_url_only + "?sslmode=require"
 elif not DATABASE_URL:
+    # Fallback local
     FINAL_DATABASE_URL = "postgresql://user:password@localhost:5432/mydatabase"
 else:
     FINAL_DATABASE_URL = DATABASE_URL
@@ -38,7 +39,7 @@ def conectar_y_leer_sql(query, params=None):
         return pd.DataFrame()
 
 def cargar_waypoints_ongs():
-    # Consulta para obtener las ONGs
+    # ✅ CORREGIDO: Usa 'id_municipio' (singular) como indicaste en tu esquema
     query = text("""
         SELECT o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
         FROM public.ongs o
@@ -137,7 +138,7 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
 
     return m.get_root().render()
 
-# --- 3. RUTAS DE LA APLICACIÓN ---
+# --- 3. RUTAS Y LOGIN ---
 
 @app.route('/')
 def index():
@@ -146,24 +147,26 @@ def index():
 @app.route('/login', methods=['POST'])
 def login():
     usuario = request.form.get('usuario')
-    password = request.form.get('password')
+    password_input = request.form.get('password')
 
-    if not usuario or not password:
+    if not usuario or not password_input:
         return jsonify({"error": "Datos incompletos"}), 400
 
     try:
         with engine.connect() as connection:
+            # ✅ CORRECCIÓN: Tabla 'usuario' y columna 'constraseña' (tal como pediste)
             query = text("""
                 SELECT id_usuario 
                 FROM usuario 
-                WHERE nombre_Usuario = :usuario AND contraseña = :password
+                WHERE nombre_usuario = :usuario AND constraseña = :password
             """)
-            result = connection.execute(query, {"usuario": usuario, "password": password}).fetchone()
+            result = connection.execute(query, {"usuario": usuario, "password": password_input}).fetchone()
 
             if result:
                 return redirect(url_for('mapa', id_usuario=result[0]))
             else:
                 return render_template('login.html', error="Usuario o contraseña incorrectos")
+
     except Exception as e:
         print(f"💥 Error en Login: {e}")
         return jsonify({"error_code": "DB_ERROR", "message": str(e)}), 500
@@ -175,51 +178,59 @@ def mapa():
         lon = request.args.get('lon', type=float)
         id_usuario = request.args.get('id_usuario', default=1, type=int)
 
-        if lat is None or lon is None: return "Error: Faltan coordenadas GPS.", 400
+        if lat is None or lon is None: 
+            return "Error: Faltan coordenadas GPS.", 400
 
         start_point = (lat, lon)
+        
+        # Cargar datos
         waypoints = cargar_waypoints_ongs()
         riesgo_por_municipio_nombre = cargar_datos_riesgo()
         
-        if not waypoints: return "Error: Base de datos de ONGs vacía.", 500
+        if not waypoints: 
+            return "Error: No hay ONGs en la base de datos (Tabla vacía o error de conexión).", 500
 
+        # Lógica de negocio
         ong_cercana = ong_mas_cercana(start_point, waypoints)
-        if not ong_cercana: return "Error: No se encontraron ONGs cercanas.", 500
+        if not ong_cercana: 
+            return "Error: No se encontraron ONGs cercanas.", 500
 
         ongs_ordenadas = find_sorted_ongs(start_point, waypoints)
         siguiente_recomendacion = ongs_ordenadas[1] if len(ongs_ordenadas) > 1 else None
         ongs_cercanas = ongs_ordenadas[:5]
 
+        # Cálculo de Ruta
         segmentos_ruta = []
         try:
             dest_point = (ong_cercana['lat'], ong_cercana['lon'])
             padding = 0.02 
+            
             G = ox.graph_from_bbox(
                 max(lat, dest_point[0]) + padding, min(lat, dest_point[0]) - padding, 
                 max(lon, dest_point[1]) + padding, min(lon, dest_point[1]) - padding, 
                 network_type="drive"
             )
             G = ox.distance.add_edge_lengths(G)
+            
             orig_node = ox.distance.nearest_nodes(G, lon, lat)
             dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
+            
             route = nx.astar_path(G, orig_node, dest_node, weight='length')
             route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
             
-            # --- Lógica simplificada para evitar errores de indentación ---
+            # Segmentación por riesgo
             segmento_actual = []
             municipio_actual = None
             riesgo_actual = 'Desconocido'
             
             for coord in route_coords:
                 municipio = obtener_municipio_por_proximidad(coord[0], coord[1], waypoints)
-                riesgo = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
                 
-                if municipio_actual is None:
+                if municipio_actual is None: 
                     municipio_actual = municipio
-                    riesgo_actual = riesgo
+                    riesgo_actual = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
 
                 if municipio != municipio_actual:
-                    # Cambio de municipio: guardar y reiniciar
                     if segmento_actual:
                         segmentos_ruta.append({
                             'coords': segmento_actual, 
@@ -227,24 +238,21 @@ def mapa():
                             'grado_riesgo': riesgo_actual
                         })
                     municipio_actual = municipio
-                    riesgo_actual = riesgo
+                    riesgo_actual = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
                     segmento_actual = [coord]
                 else:
-                    # Mismo municipio: continuar
                     segmento_actual.append(coord)
             
-            # Agregar el último segmento pendiente
             if segmento_actual:
                 segmentos_ruta.append({
                     'coords': segmento_actual, 
                     'municipio': municipio_actual, 
                     'grado_riesgo': riesgo_actual
                 })
-            # -----------------------------------------------------------
 
         except Exception as e:
             print(f"⚠️ Advertencia Ruta: {e}")
-            segmentos_ruta = [] 
+            segmentos_ruta = []
 
         map_html = generar_mapa_movil_con_recomendaciones(
             start_point, ong_cercana, segmentos_ruta, waypoints, 
