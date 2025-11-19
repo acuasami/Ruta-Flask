@@ -1,19 +1,17 @@
+# nixpacks.toml
+
+# Incluimos los paquetes de sistema GEOS y GDAL que necesita Python.
+# Hemos eliminado las líneas de "export" que estaban causando el conflicto de compilación.
 [phases.setup]
-# Usamos NixPkgs para asegurar que GDAL y GEOS estén instalados en el entorno de build
 nixPkgs = [
-  "gdal", 
-  "geos" 
+  "gdal",    
+  "geos",     
+  "pkg-config" # Ayuda al compilador a encontrar las librerías
 ]
 
 [phases.install]
-# ⚠️ SOLUCIÓN CLAVE: Declarar dónde encontrar las librerías C durante la compilación de Shapely/Geopandas.
-# Esto resuelve el error "No se pudo encontrar la biblioteca geos_c".
-cmds = [
-    # Exporta las rutas de inclusión para las librerías C/C++
-    "export C_INCLUDE_PATH=${NIX_CFLAGS_COMPILE:-} ${NIX_BUILD_TOP:-}/include",
-    "export LIBRARY_PATH=${NIX_LDFLAGS_AFTER:-} ${NIX_BUILD_TOP:-}/lib",
-    "pip install -r requirements.txt"
-]
+# Simplemente le pedimos a pip que instale, confiando en que Nix ya ha configurado las rutas.
+cmds = ["pip install -r requirements.txt"]
 
 [start]
 cmd = "gunicorn --bind 0.0.0.0:$PORT app:app --workers 1"
