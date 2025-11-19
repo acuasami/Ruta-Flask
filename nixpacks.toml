@@ -1,13 +1,11 @@
-# nixpacks.toml
+# nixpacks.toml (Versión Minimalista con lo Esencial)
 
-# Usamos el sistema Nix para incluir paquetes con todas sus dependencias
-# transitivas, una forma más robusta que aptPackages.
+# Usamos el sistema Nix para incluir solo las dependencias C/C++ esenciales,
+# evitando conflictos de versiones.
 [phases.setup]
 nixPkgs = [
-  "python3",
-  "pkg-config", 
-  "gdal",       # Dependencia principal para geopandas/osmnx
-  "geos"        # Dependencia principal para shapely/geopandas
+  "gdal",    # GDAL y sus dependencias (PROJ)
+  "geos"     # GEOS
 ]
 
 [phases.install]
