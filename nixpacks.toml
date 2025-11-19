@@ -1,12 +1,13 @@
-# nixpacks.toml (Versión Final)
-
+# nixpacks.toml (Ajustado para Python 3.9)
 [phases.setup]
+# Usamos NixPkgs para incluir los paquetes base
 nixPkgs = [
   "gdal",    
   "geos"
 ]
 
 [phases.install]
+# Usamos el comando de instalación estándar
 cmds = ["pip install -r requirements.txt"]
 
 [start]
