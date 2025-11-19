@@ -151,7 +151,7 @@ def login():
     password = request.form['password']
     try:
         with engine.connect() as connection:
-            query = text("SELECT id_usuario FROM usuarios WHERE usuario = :usuario AND password = :password")
+            query = text("SELECT id_usuario FROM usuario WHERE usuario = :usuario AND password = :password")
             result = connection.execute(query, {"usuario": usuario, "password": password}).fetchone()
             if result:
                 return redirect(url_for('mapa', id_usuario=result[0]))
@@ -228,3 +228,4 @@ def mapa():
     except Exception as e:
         print(f"💥 Error fatal: {e}")
         return f"Error del servidor: {e}", 500
+
