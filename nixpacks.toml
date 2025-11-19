@@ -1,15 +1,19 @@
-# nixpacks.toml (Versión Minimalista con lo Esencial)
-
-# Usamos el sistema Nix para incluir solo las dependencias C/C++ esenciales,
-# evitando conflictos de versiones.
 [phases.setup]
+# Usamos NixPkgs para asegurar que GDAL y GEOS estén instalados en el entorno de build
 nixPkgs = [
-  "gdal",    # GDAL y sus dependencias (PROJ)
-  "geos"     # GEOS
+  "gdal", 
+  "geos" 
 ]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+# ⚠️ SOLUCIÓN CLAVE: Declarar dónde encontrar las librerías C durante la compilación de Shapely/Geopandas.
+# Esto resuelve el error "No se pudo encontrar la biblioteca geos_c".
+cmds = [
+    # Exporta las rutas de inclusión para las librerías C/C++
+    "export C_INCLUDE_PATH=${NIX_CFLAGS_COMPILE:-} ${NIX_BUILD_TOP:-}/include",
+    "export LIBRARY_PATH=${NIX_LDFLAGS_AFTER:-} ${NIX_BUILD_TOP:-}/lib",
+    "pip install -r requirements.txt"
+]
 
 [start]
 cmd = "gunicorn --bind 0.0.0.0:$PORT app:app --workers 1"
