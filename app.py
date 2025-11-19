@@ -50,7 +50,7 @@ def conectar_y_leer_sql(query):
             # 1. Filtrar los parámetros válidos (sin Nones)
             valid_config = {k: v for k, v in DB_CONFIG.items() if v is not None and v != 0}
             
-            # 2. Verificar que las claves críticas existan (DEBE IR PRIMERO)
+            # 2. Verificar que las claves críticas existan ANTES de conectar
             required_keys = ['host', 'dbname', 'user', 'password']
             if not all(key in valid_config for key in required_keys):
                 print("❌ Faltan variables de entorno (PGHOST, PGDATABASE, PGUSER, PGPASSWORD) en el entorno de Railway.")
@@ -258,7 +258,7 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
             icon=folium.Icon(color="green", icon=icono, prefix="fa")
         ).add_to(m)
     
-    # --- MARCADOR DE LA SIGUIENTE RECOMENDACIÓN ---
+    # --- MARCADOR DE LA SIGUIENTE RECOMENDACIÓN ---\
     if siguiente_recomendacion:
         folium.Marker(
             location=(siguiente_recomendacion['lat'], siguiente_recomendacion['lon']),
@@ -845,5 +845,3 @@ if __name__ == '__main__':
     # Esta parte solo se usa para pruebas locales, Railway usa el 'Procfile'
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
-
