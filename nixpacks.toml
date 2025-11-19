@@ -1,6 +1,15 @@
 # nixpacks.toml
+
+# Esta lista incluye los paquetes y las cabeceras de desarrollo
+# necesarios para GDAL, GEOS y PROJ, asegurando que geopandas/osmnx se instalen.
 [phases.setup]
-aptPackages = ["libgdal-dev", "libgeos-dev"]
+aptPackages = [
+  "gdal-bin",     # Binarios de GDAL
+  "libgdal-dev",  # Cabeceras de desarrollo de GDAL
+  "libgeos-dev",  # Cabeceras de desarrollo de GEOS
+  "proj-bin",     # Binarios de Proj
+  "libproj-dev"   # Cabeceras de desarrollo de Proj
+]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
