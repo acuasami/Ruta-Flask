@@ -715,6 +715,12 @@ def serve_map():
         ong_cercana = ong_mas_cercana(start_point, waypoints)
         ongs_ordenadas = find_sorted_ongs(start_point, waypoints)
         
+        # --- VERIFICACIÓN DE ROBUSTEZ CRÍTICA (AÑADIDA) ---
+        if ong_cercana is None:
+            print("❌ Error 500: No se encontró ninguna ONG válida (no frontera) para destino.")
+            return "<h1>Error 500: No se encontró ONG Destino Válida.</h1><p>Asegúrate de que existan ONGs válidas en la base de datos.</p>", 500
+        # ----------------------------------------------------
+        
         siguiente_recomendacion = None
         if len(ongs_ordenadas) > 1:
             siguiente_recomendacion = ongs_ordenadas[1]
@@ -754,6 +760,10 @@ def serve_map():
                 )
                 print("✅ Grafo descargado")
                 
+                # ✅ LÍNEA CRÍTICA AÑADIDA: Garantiza que todas las aristas tengan la propiedad 'length' en metros
+                G = ox.distance.add_edge_lengths(G)
+
+                # --- El resto del código continúa aquí ---
                 orig_node = ox.distance.nearest_nodes(G, lon, lat)
                 dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
                 
@@ -844,4 +854,4 @@ def serve_map():
 if __name__ == '__main__':
     # Esta parte solo se usa para pruebas locales, Railway usa el 'Procfile'
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False)             
