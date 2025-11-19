@@ -12,32 +12,72 @@ from shapely.geometry import Point, LineString
 import geopandas as gpd
 import numpy as np
 from networkx.exception import NetworkXNoPath
+import sys
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN DE BASE DE DATOS ---
-# (Asegúrate de que estas variables de entorno existan en Railway)
+# --- CONFIGURACIÓN DE BASE DE DATOS (ARREGLADA Y SEGURA) ---
+
+# 1. Intenta obtener la URL de conexión estándar (usada por Railway/Heroku)
+DATABASE_URL = os.environ.get('DATABASE_URL')
+
+# 2. Si no existe, construye la configuración a partir de variables individuales
+# **IMPORTANTE: Se eliminaron los valores de fallback inseguros/hardcodeados.**
 DB_CONFIG = {
-    'host': os.environ.get('PGHOST', 'tramway.proxy.rlwy.net'),
-    'port': int(os.environ.get('PGPORT', 31631)),
-    'dbname': os.environ.get('PGDATABASE', 'railway'),
-    'user': os.environ.get('PGUSER', 'postgres'),
-    'password': os.environ.get('PGPASSWORD', 'KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ')
+    'host': os.environ.get('PGHOST'),
+    'port': os.environ.get('PGPORT', 0), # Usamos 0 como valor seguro si no existe
+    'dbname': os.environ.get('PGDATABASE'),
+    'user': os.environ.get('PGUSER'),
+    'password': os.environ.get('PGPASSWORD')
 }
 
 # --- TODA LA LÓGICA DE TU NOTEBOOK VA AQUÍ ---
-# He movido la lógica principal a funciones para que sea más limpio.
 
 def conectar_y_leer_sql(query):
-    """Conecta a la BD, ejecuta una consulta y devuelve un DataFrame."""
+    """
+    Conecta a la BD, ejecuta una consulta y devuelve un DataFrame.
+    Ahora prioriza DATABASE_URL (DSN) para una conexión más robusta.
+    """
+    conn = None
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
+        # Prioridad 1: Usar la URL completa (DSN) si está disponible (la más robusta)
+        if DATABASE_URL:
+            print("🔗 Intentando conectar usando DATABASE_URL...")
+            conn = psycopg2.connect(DATABASE_URL)
+        
+        # Prioridad 2: Usar el diccionario de configuración de variables individuales
+        else:
+            # Filtra las entradas None/vacías, y usa solo valores definidos
+            valid_config = {k: v for k, v in DB_CONFIG.items() if v is not None and v != 0}
+            
+            # Verificar que al menos los parámetros principales existan
+            required_keys = ['host', 'dbname', 'user', 'password']
+            if not all(key in valid_config for key in required_keys):
+                # Esto generará una advertencia clara si Railway no inyecta las variables
+                print("❌ Faltan variables de entorno (PGHOST, PGDATABASE, PGUSER, PGPASSWORD) en el entorno de Railway.")
+                print("   Asegúrate de que la base de datos esté enlazada correctamente al servicio.")
+                sys.stdout.flush() # Forzar la impresión de la advertencia
+                raise ValueError("Faltan credenciales DB.")
+
+            print("🔗 Intentando conectar usando variables individuales...")
+            # Convierte el puerto a int si existe, solo para psycopg2
+            if 'port' in valid_config:
+                 valid_config['port'] = int(valid_config['port'])
+            
+            conn = psycopg2.connect(**valid_config)
+
+        # Si la conexión es exitosa, lee los datos
         df = pd.read_sql(query, conn)
-        conn.close()
         return df
+        
     except Exception as e:
-        print(f"❌ Error al leer la base de datos: {e}")
+        print(f"❌ Error al conectar o leer la base de datos: {e}")
+        # En caso de fallo, devuelve un DataFrame vacío 
         return pd.DataFrame()
+        
+    finally:
+        if conn:
+            conn.close() # Asegura que la conexión se cierre
 
 def cargar_waypoints_ongs():
     """Carga todas las ONGs y municipios desde la BD."""
@@ -48,6 +88,10 @@ def cargar_waypoints_ongs():
     """
     df_ongs = conectar_y_leer_sql(QUERY_ONG)
     
+    if df_ongs.empty: # Manejo de error si la conexión falló
+        print("⚠️ No se pudieron cargar las ONGs debido a un error de conexión/lectura.")
+        return []
+        
     df_ongs.rename(columns={
         'nom_ong': 'name', 'tipo': 'type', 'latitud': 'lat', 
         'longitud': 'lon', 'nom_municipio': 'municipio'
@@ -65,6 +109,7 @@ def cargar_datos_riesgo():
     df_municipio = conectar_y_leer_sql("SELECT * FROM public.municipio;")
 
     if df_fecha.empty or df_municipio.empty:
+        print("⚠️ No se pudieron cargar los datos de riesgo debido a un error de conexión/lectura.")
         return {}
 
     df_fecha['fecha'] = pd.to_datetime(df_fecha['fecha'])
@@ -206,7 +251,7 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
                 max_width=320
             ),
             tooltip=f"Destino: {ong_cercana['name']}",
-            icon=folium.Icon(color="green", icon="bed", prefix="fa")
+            icon=folium.Icon(color="green", icon=icono, prefix="fa")
         ).add_to(m)
     
     # --- MARCADOR DE LA SIGUIENTE RECOMENDACIÓN ---
@@ -237,7 +282,11 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
     # --- OTRAS ONGs CON FICHAS INFORMATIVAS COMPLETAS ---
     ongs_marcadas = 0
     for ong in waypoints:
-        if ong_cercana and ong['name'] != ong_cercana.get('name', '') and (not siguiente_recomendacion or ong['name'] != siguiente_recomendacion.get('name', '')):
+        # Evitar marcar dos veces el destino y la recomendación
+        is_dest = ong_cercana and ong['name'] == ong_cercana.get('name', '')
+        is_rec = siguiente_recomendacion and ong['name'] == siguiente_recomendacion.get('name', '')
+        
+        if not is_dest and not is_rec:
             municipio_ong = ong.get('municipio', 'Desconocido')
             
             # Determinar color según tipo
@@ -322,6 +371,7 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
     destino_municipio = ong_cercana.get('municipio', 'Desconocido') if ong_cercana else 'Desconocido'
     
     # Calcular estadísticas de riesgo de la ruta
+    total_segmentos = len(segmentos_ruta)
     riesgo_alto = sum(1 for s in segmentos_ruta if s['grado_riesgo'] == 'Alto')
     riesgo_medio = sum(1 for s in segmentos_ruta if s['grado_riesgo'] == 'Medio')
     riesgo_bajo = sum(1 for s in segmentos_ruta if s['grado_riesgo'] == 'Bajo')
@@ -340,8 +390,11 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
     
     # Crear HTML para otras ONGs cercanas
     otras_ongs_html = ""
-    if len(ongs_cercanas) > 2:
-        for ong in ongs_cercanas[2:7]:
+    # Evitar mostrar el destino actual y la recomendación
+    ongs_filtradas = [o for o in ongs_cercanas if o['name'] != destino_nombre and o['name'] != rec_nombre]
+    
+    if ongs_filtradas:
+        for ong in ongs_filtradas[:5]:
             otras_ongs_html += f"""
             <div style="font-size:10px; margin:4px 0; padding:5px; background:#f8f9fa; border-radius:4px; border-left: 3px solid #4A00E0;">
                 <div style="font-weight:bold;">{ong['name']}</div>
@@ -365,7 +418,6 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
     z-index: 9999; 
     font-family: Arial, sans-serif;
 ">
-    <!-- Botón principal -->
     <div id="info-toggle" style="
         background: #4A00E0; 
         color: white; 
@@ -387,7 +439,6 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
         <span id="toggle-arrow">▼</span>
     </div>
 
-    <!-- Panel principal -->
     <div id="info-panel" style="
         background: white; 
         border: 2px solid #4A00E0; 
@@ -398,7 +449,6 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
         box-shadow: 0 4px 15px rgba(0,0,0,0.2);
         display: none;
     ">
-        <!-- Pestañas -->
         <div style="display: flex; border-bottom: 1px solid #ddd; background: #f8f9fa;">
             <div class="tab-button active" onclick="switchTab('destino')" style="flex:1; padding:8px; text-align:center; cursor:pointer; border-bottom: 2px solid #4A00E0; font-size:11px;">🎯 Destino</div>
             <div class="tab-button" onclick="switchTab('riesgo')" style="flex:1; padding:8px; text-align:center; cursor:pointer; font-size:11px;">📊 Riesgo</div>
@@ -406,10 +456,8 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
             <div class="tab-button" onclick="switchTab('ruta')" style="flex:1; padding:8px; text-align:center; cursor:pointer; font-size:11px;">🗺️ Ruta</div>
         </div>
 
-        <!-- Contenido de pestañas -->
         <div style="padding: 12px; max-height: 400px; overflow-y: auto;">
             
-            <!-- Pestaña Destino -->
             <div id="tab-destino" class="tab-content">
                 <div style="margin-bottom: 15px;">
                     <h4 style="margin:0 0 8px 0; color:#4A00E0; font-size:13px;">🏠 ONG Destino Actual</h4>
@@ -431,24 +479,21 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
                 </div>
             </div>
 
-            <!-- Pestaña Riesgo -->
             <div id="tab-riesgo" class="tab-content" style="display: none;">
                 <h4 style="margin:0 0 10px 0; color:#4A00E0; font-size:13px;">📊 Análisis de Riesgo</h4>
                 
                 <div style="margin-bottom: 15px;">
                     <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                         <span style="font-size:11px; font-weight:bold;">Resumen de Segmentos:</span>
-                        <span style="font-size:11px; font-weight:bold;">{len(segmentos_ruta)} total</span>
+                        <span style="font-size:11px; font-weight:bold;">{total_segmentos} total</span>
                     </div>
                     
-                    <!-- Barra de progreso de riesgo -->
                     <div style="background: #f0f0f0; border-radius: 10px; height: 20px; margin-bottom: 10px; overflow: hidden;">
-                        <div style="background: green; width: {(riesgo_bajo/len(segmentos_ruta))*100 if segmentos_ruta else 0}%; height: 100%; float: left;" title="Bajo: {riesgo_bajo}"></div>
-                        <div style="background: orange; width: {(riesgo_medio/len(segmentos_ruta))*100 if segmentos_ruta else 0}%; height: 100%; float: left;" title="Medio: {riesgo_medio}"></div>
-                        <div style="background: red; width: {(riesgo_alto/len(segmentos_ruta))*100 if segmentos_ruta else 0}%; height: 100%; float: left;" title="Alto: {riesgo_alto}"></div>
+                        <div style="background: green; width: {(riesgo_bajo/total_segmentos)*100 if total_segmentos else 0}%; height: 100%; float: left;" title="Bajo: {riesgo_bajo}"></div>
+                        <div style="background: orange; width: {(riesgo_medio/total_segmentos)*100 if total_segmentos else 0}%; height: 100%; float: left;" title="Medio: {riesgo_medio}"></div>
+                        <div style="background: red; width: {(riesgo_alto/total_segmentos)*100 if total_segmentos else 0}%; height: 100%; float: left;" title="Alto: {riesgo_alto}"></div>
                     </div>
                     
-                    <!-- Leyenda de colores -->
                     <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; text-align: center;">
                         <div>
                             <div style="color: green; font-size:12px;">● {riesgo_bajo}</div>
@@ -466,7 +511,6 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
                 </div>
             </div>
 
-            <!-- Pestaña Recomendación -->
             <div id="tab-recomendacion" class="tab-content" style="display: none;">
                 <h4 style="margin:0 0 10px 0; color:#4A00E0; font-size:13px;">⭐ Próxima Recomendación</h4>
                 
@@ -501,13 +545,12 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
                 </div>
             </div>
 
-            <!-- Pestaña Ruta -->
             <div id="tab-ruta" class="tab-content" style="display: none;">
                 <h4 style="margin:0 0 10px 0; color:#4A00E0; font-size:13px;">🗺️ Detalles de Ruta</h4>
                 
                 <div style="margin-bottom: 10px;">
                     <div style="font-size:11px; margin-bottom: 5px;"><b>ONGs disponibles:</b> {len(waypoints)}</div>
-                    <div style="font-size:11px; margin-bottom: 5px;"><b>Segmentos calculados:</b> {len(segmentos_ruta)}</div>
+                    <div style="font-size:11px; margin-bottom: 5px;"><b>Segmentos calculados:</b> {total_segmentos}</div>
                 </div>
 
                 <div style="max-height: 200px; overflow-y: auto; border: 1px solid #eee; border-radius: 5px; padding: 8px;">
@@ -646,6 +689,10 @@ def serve_map():
         lon = request.args.get('lon', type=float)
         id_usuario = request.args.get('id_usuario', default=1, type=int)
         
+        # Validación básica de coordenadas
+        if lat is None or lon is None:
+            return "Error: Faltan parámetros 'lat' o 'lon' en la URL.", 400
+            
         start_point = (lat, lon)
         
         print(f"🚀 Petición recibida para Usuario: {id_usuario}, Ubicación: {start_point}")
@@ -655,6 +702,11 @@ def serve_map():
         riesgo_por_municipio_nombre = cargar_datos_riesgo()
         colores_riesgo = {'Alto': 'red', 'Medio': 'orange', 'Bajo': 'green', 'Desconocido': 'gray'}
 
+        # Si no hay waypoints, no podemos calcular nada
+        if not waypoints:
+            print("❌ No hay waypoints disponibles. Comprueba la conexión a la base de datos.")
+            return "Error: No hay datos de ONGs disponibles. Comprueba la BD.", 500
+        
         # 3. Calcular ONG más cercana y recomendación
         ong_cercana = ong_mas_cercana(start_point, waypoints)
         ongs_ordenadas = find_sorted_ongs(start_point, waypoints)
@@ -665,15 +717,18 @@ def serve_map():
         elif len(ongs_ordenadas) == 1:
             siguiente_recomendacion = ongs_ordenadas[0]
             
-        ongs_cercanas = ongs_ordenadas[:5]
+        # Si el destino es la única ONG, la recomendación no tiene sentido, la filtramos para el panel
+        if siguiente_recomendacion and ong_cercana and siguiente_recomendacion['name'] == ong_cercana['name']:
+            ongs_cercanas = ongs_ordenadas[:1] # Solo el destino
+        else:
+            ongs_cercanas = ongs_ordenadas[:5]
 
         # 4. Calcular la ruta (¡Esta es la parte lenta!)
-        # 🚨 Advertencia de rendimiento: esto puede ser muy lento
-        
         segmentos_ruta = []
         if ong_cercana:
             try:
                 dest_point = (ong_cercana['lat'], ong_cercana['lon'])
+                
                 # 1. Definir el bounding box (rectángulo)
                 north = max(lat, dest_point[0])
                 south = min(lat, dest_point[0])
@@ -708,7 +763,6 @@ def serve_map():
                 route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
                 
                 # --- INICIO DE LA LÓGICA DE SEGMENTACIÓN COMPLETA ---
-                # (Lógica extraída de tu prueba_OSM.ipynb)
                 
                 segmento_actual = []
                 municipio_actual = None
