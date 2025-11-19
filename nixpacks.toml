@@ -1,12 +1,9 @@
-# Definimos los paquetes de sistema (apt) necesarios para las librerías geoespaciales.
-# Esto preinstala las cabeceras de desarrollo de GDAL y GEOS.
+# nixpacks.toml
 [phases.setup]
 aptPackages = ["libgdal-dev", "libgeos-dev"]
 
-# Aseguramos que la fase de instalación de paquetes de Python suceda después
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
-# Aunque ya tienes un Procfile, lo aseguramos aquí para evitar errores de inicio
 [start]
 cmd = "gunicorn --bind 0.0.0.0:$PORT app:app --workers 1"
