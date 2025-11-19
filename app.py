@@ -47,10 +47,10 @@ def conectar_y_leer_sql(query):
         
         # Prioridad 2: Usar el diccionario de configuración de variables individuales
         else:
-            # Filtra las entradas None/vacías, y usa solo valores definidos
+            # 1. Filtrar los parámetros válidos (sin Nones)
             valid_config = {k: v for k, v in DB_CONFIG.items() if v is not None and v != 0}
             
-            # Verificar que al menos los parámetros principales existan
+            # 2. Verificar que las claves críticas existan (DEBE IR PRIMERO)
             required_keys = ['host', 'dbname', 'user', 'password']
             if not all(key in valid_config for key in required_keys):
                 print("❌ Faltan variables de entorno (PGHOST, PGDATABASE, PGUSER, PGPASSWORD) en el entorno de Railway.")
@@ -59,13 +59,15 @@ def conectar_y_leer_sql(query):
                 raise ValueError("Faltan credenciales DB.")
 
             print("🔗 Intentando conectar usando variables individuales con SSL...")
-            # Convierte el puerto a int si existe, solo para psycopg2
+            
+            # 3. Preparar parámetros de conexión
             if 'port' in valid_config:
                  valid_config['port'] = int(valid_config['port'])
 
             # ✅ LÍNEA CLAVE AGREGADA PARA FORZAR SSL EN RAILWAY:
             valid_config['sslmode'] = 'require' 
             
+            # 4. Intentar la conexión
             conn = psycopg2.connect(**valid_config)
 
         # Si la conexión es exitosa, lee los datos
@@ -843,4 +845,5 @@ if __name__ == '__main__':
     # Esta parte solo se usa para pruebas locales, Railway usa el 'Procfile'
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
