@@ -36,7 +36,7 @@ DB_CONFIG = {
 def conectar_y_leer_sql(query):
     """
     Conecta a la BD, ejecuta una consulta y devuelve un DataFrame.
-    Ahora prioriza DATABASE_URL (DSN) para una conexión más robusta.
+    Ahora incluye la configuración SSL requerida por Railway.
     """
     conn = None
     try:
@@ -53,16 +53,18 @@ def conectar_y_leer_sql(query):
             # Verificar que al menos los parámetros principales existan
             required_keys = ['host', 'dbname', 'user', 'password']
             if not all(key in valid_config for key in required_keys):
-                # Esto generará una advertencia clara si Railway no inyecta las variables
                 print("❌ Faltan variables de entorno (PGHOST, PGDATABASE, PGUSER, PGPASSWORD) en el entorno de Railway.")
                 print("   Asegúrate de que la base de datos esté enlazada correctamente al servicio.")
-                sys.stdout.flush() # Forzar la impresión de la advertencia
+                sys.stdout.flush() 
                 raise ValueError("Faltan credenciales DB.")
 
-            print("🔗 Intentando conectar usando variables individuales...")
+            print("🔗 Intentando conectar usando variables individuales con SSL...")
             # Convierte el puerto a int si existe, solo para psycopg2
             if 'port' in valid_config:
                  valid_config['port'] = int(valid_config['port'])
+
+            # ✅ LÍNEA CLAVE AGREGADA PARA FORZAR SSL EN RAILWAY:
+            valid_config['sslmode'] = 'require' 
             
             conn = psycopg2.connect(**valid_config)
 
@@ -841,3 +843,4 @@ if __name__ == '__main__':
     # Esta parte solo se usa para pruebas locales, Railway usa el 'Procfile'
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
