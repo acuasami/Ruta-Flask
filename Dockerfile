@@ -1,7 +1,7 @@
-# CAMBIO IMPORTANTE: Usamos "slim-bookworm" (Debian 12) que sí tiene repositorios activos
+# USAR ESTA IMAGEN (Bookworm es más reciente y funciona)
 FROM python:3.11-slim-bookworm
 
-# 1. Instalar librerías de sistema necesarias para GDAL/GEOS y compilación
+# 1. Instalar librerías de sistema
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -13,18 +13,18 @@ RUN apt-get update && \
     pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-# 2. Configurar variables para que Python encuentre GDAL/GEOS al compilar
+# 2. Variables de entorno para GDAL
 ENV CPLUS_INCLUDE_PATH=/usr/include/gdal
 ENV C_INCLUDE_PATH=/usr/include/gdal
 
-# 3. Preparar el directorio de trabajo
+# 3. Directorio de trabajo
 WORKDIR /app
 
-# 4. Copiar dependencias e instalar
+# 4. Instalar dependencias
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Copiar el resto del código
+# 5. Copiar el código
 COPY . /app
 
 # 6. Comando de arranque
