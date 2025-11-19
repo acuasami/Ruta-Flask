@@ -15,24 +15,21 @@ app = Flask(__name__)
 # --- 1. CONFIGURACIÓN DE BASE DE DATOS ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# Forzar sslmode=require para Railway si la URL existe
+# Forzar sslmode=require para Railway
 if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
     base_url_only = DATABASE_URL.split('?')[0]
     FINAL_DATABASE_URL = base_url_only + "?sslmode=require"
 elif not DATABASE_URL:
-    # Fallback solo para local
+    # Fallback local
     FINAL_DATABASE_URL = "postgresql://user:password@localhost:5432/mydatabase"
 else:
     FINAL_DATABASE_URL = DATABASE_URL
 
-# Crear el motor de conexión
 engine = create_engine(FINAL_DATABASE_URL)
 
-
-# --- 2. FUNCIONES DE LÓGICA (CÓDIGO COMPLETO) ---
+# --- 2. FUNCIONES DE LÓGICA (RESTAURADAS) ---
 
 def conectar_y_leer_sql(query):
-    """Función auxiliar para leer SQL de forma segura"""
     try:
         with engine.connect() as conn:
             return pd.read_sql(query, conn)
@@ -41,7 +38,6 @@ def conectar_y_leer_sql(query):
         return pd.DataFrame()
 
 def cargar_waypoints_ongs():
-    """Carga datos de la BD usando el motor SQLAlchemy"""
     query = text("""
         SELECT o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
         FROM public.ongs o
@@ -51,13 +47,11 @@ def cargar_waypoints_ongs():
     
     if df.empty: return []
 
-    # Normalizar nombres
     df.rename(columns={
         'nom_ong': 'name', 'tipo': 'type', 'latitud': 'lat', 
         'longitud': 'lon', 'nom_municipio': 'municipio'
     }, inplace=True)
     
-    # Limpiar datos
     df['lat'] = pd.to_numeric(df['lat'], errors='coerce')
     df['lon'] = pd.to_numeric(df['lon'], errors='coerce')
     df = df.dropna(subset=['lat', 'lon'])
@@ -72,6 +66,8 @@ def cargar_datos_riesgo():
         return {}
 
     df_fecha['fecha'] = pd.to_datetime(df_fecha['fecha'])
+    if df_fecha.empty: return {}
+        
     ultimo_mes = df_fecha['fecha'].max().month
     ultimo_ano = df_fecha['fecha'].max().year
     
@@ -121,50 +117,25 @@ def obtener_municipio_por_proximidad(lat, lon, waypoints):
     return municipio_cercano
 
 def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segmentos_ruta, waypoints, id_usuario, colores_riesgo, ongs_cercanas, siguiente_recomendacion):
-    m = folium.Map(
-        location=ubicacion_usuario,
-        zoom_start=13,
-        tiles="CartoDB positron",
-        width='100%', 
-        height='100vh' 
-    )
+    m = folium.Map(location=ubicacion_usuario, zoom_start=13, tiles="CartoDB positron", width='100%', height='100vh')
+    m.options['touchZoom'] = True
+    m.options['dragging'] = True
     
     # Dibujar ruta
-    print("🎨 Dibujando ruta...")
     for segmento in segmentos_ruta:
         color = colores_riesgo.get(segmento['grado_riesgo'], 'gray')
-        folium.PolyLine(
-            segmento['coords'],
-            color=color,
-            weight=8,
-            opacity=0.9,
-            tooltip=f"🏙️ {segmento['municipio']} | 🎯 Riesgo: {segmento['grado_riesgo']}"
-        ).add_to(m)
+        folium.PolyLine(segmento['coords'], color=color, weight=8, opacity=0.9).add_to(m)
     
-    # Marcador Usuario
-    folium.Marker(
-        location=ubicacion_usuario,
-        popup=f"Tu Ubicación",
-        icon=folium.Icon(color="blue", icon="user", prefix="fa")
-    ).add_to(m)
+    # Marcadores
+    folium.Marker(location=ubicacion_usuario, popup=f"Tu Ubicación", icon=folium.Icon(color="blue", icon="user", prefix="fa")).add_to(m)
     
-    # Marcador Destino
     if ong_cercana:
         tipo = ong_cercana.get('type', 'default')
         color = 'red' if tipo == 'Frontera' else 'green'
-        folium.Marker(
-            location=(ong_cercana['lat'], ong_cercana['lon']),
-            popup=f"Destino: {ong_cercana['name']}",
-            icon=folium.Icon(color=color, icon="home", prefix="fa")
-        ).add_to(m)
+        folium.Marker(location=(ong_cercana['lat'], ong_cercana['lon']), popup=f"Destino: {ong_cercana['name']}", icon=folium.Icon(color=color, icon="home", prefix="fa")).add_to(m)
 
-    # Marcador Recomendación
     if siguiente_recomendacion:
-        folium.Marker(
-            location=(siguiente_recomendacion['lat'], siguiente_recomendacion['lon']),
-            popup=f"Recomendación: {siguiente_recomendacion['name']}",
-            icon=folium.Icon(color="orange", icon="star", prefix="fa")
-        ).add_to(m)
+        folium.Marker(location=(siguiente_recomendacion['lat'], siguiente_recomendacion['lon']), popup=f"Recomendación: {siguiente_recomendacion['name']}", icon=folium.Icon(color="orange", icon="star", prefix="fa")).add_to(m)
 
     return m.get_root().render()
 
@@ -178,18 +149,15 @@ def index():
 def login():
     usuario = request.form['usuario']
     password = request.form['password']
-
     try:
         with engine.connect() as connection:
             query = text("SELECT id_usuario FROM usuarios WHERE usuario = :usuario AND password = :password")
             result = connection.execute(query, {"usuario": usuario, "password": password}).fetchone()
-
             if result:
                 return redirect(url_for('mapa', id_usuario=result[0]))
             else:
                 return render_template('login.html', error="Usuario o contraseña incorrectos")
     except Exception as e:
-        print(f"Error BD: {e}")
         return jsonify({"error": "Fallo en base de datos", "detalle": str(e)}), 500
 
 @app.route('/mapa')
@@ -199,90 +167,62 @@ def mapa():
         lon = request.args.get('lon', type=float)
         id_usuario = request.args.get('id_usuario', default=1, type=int)
 
-        if lat is None or lon is None:
-            return "Error: Faltan coordenadas GPS.", 400
+        if lat is None or lon is None: return "Error: Faltan coordenadas GPS.", 400
 
         start_point = (lat, lon)
         waypoints = cargar_waypoints_ongs()
         riesgo_por_municipio_nombre = cargar_datos_riesgo()
         
-        if not waypoints:
-            return "Error: No hay ONGs en la base de datos.", 500
+        if not waypoints: return "Error: No hay ONGs en la base de datos.", 500
 
         ong_cercana = ong_mas_cercana(start_point, waypoints)
-        if not ong_cercana:
-            return "Error: No se encontraron ONGs cercanas.", 500
+        if not ong_cercana: return "Error: No se encontraron ONGs cercanas.", 500
 
-        # Calcular recomendaciones
         ongs_ordenadas = find_sorted_ongs(start_point, waypoints)
         siguiente_recomendacion = ongs_ordenadas[1] if len(ongs_ordenadas) > 1 else None
         ongs_cercanas = ongs_ordenadas[:5]
 
-        # Calcular Ruta con OSMnx
         segmentos_ruta = []
         try:
             dest_point = (ong_cercana['lat'], ong_cercana['lon'])
             padding = 0.02 
-            
-            print("🗺️ Descargando grafo OSMnx...")
             G = ox.graph_from_bbox(
-                max(lat, dest_point[0]) + padding, 
-                min(lat, dest_point[0]) - padding, 
-                max(lon, dest_point[1]) + padding, 
-                min(lon, dest_point[1]) - padding, 
+                max(lat, dest_point[0]) + padding, min(lat, dest_point[0]) - padding, 
+                max(lon, dest_point[1]) + padding, min(lon, dest_point[1]) - padding, 
                 network_type="drive"
             )
-            
-            # FIX CRÍTICO: Asegurar longitudes
             G = ox.distance.add_edge_lengths(G)
-            
             orig_node = ox.distance.nearest_nodes(G, lon, lat)
             dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
-            
             route = nx.astar_path(G, orig_node, dest_node, weight='length')
             route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
             
-            # Segmentar por riesgo (versión simplificada)
-            municipio_actual = None
             segmento_actual = []
+            municipio_actual = None
+            riesgo_actual = 'Desconocido'
             
             for coord in route_coords:
                 municipio = obtener_municipio_por_proximidad(coord[0], coord[1], waypoints)
                 riesgo = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
-                
-                if municipio_actual is None: 
-                    municipio_actual = municipio
-                
+                if municipio_actual is None: municipio_actual = municipio
                 if municipio == municipio_actual:
                     segmento_actual.append(coord)
                 else:
-                    segmentos_ruta.append({
-                        'coords': segmento_actual,
-                        'municipio': municipio_actual,
-                        'grado_riesgo': riesgo_por_municipio_nombre.get(municipio_actual, 'Desconocido')
-                    })
+                    segmentos_ruta.append({'coords': segmento_actual, 'municipio': municipio_actual, 'grado_riesgo': riesgo_por_municipio_nombre.get(municipio_actual, 'Desconocido')})
                     municipio_actual = municipio
                     segmento_actual = [coord]
-            
             if segmento_actual:
-                segmentos_ruta.append({
-                    'coords': segmento_actual,
-                    'municipio': municipio_actual,
-                    'grado_riesgo': riesgo_por_municipio_nombre.get(municipio_actual, 'Desconocido')
-                })
+                segmentos_ruta.append({'coords': segmento_actual, 'municipio': municipio_actual, 'grado_riesgo': riesgo_por_municipio_nombre.get(municipio_actual, 'Desconocido')})
 
         except Exception as e:
-            print(f"⚠️ Advertencia: No se pudo calcular la ruta callejera: {e}")
-            # Si falla la ruta, la app sigue funcionando, solo que sin línea azul
+            print(f"⚠️ Advertencia: {e}")
             segmentos_ruta = []
 
-        # Generar Mapa
         map_html = generar_mapa_movil_con_recomendaciones(
             start_point, ong_cercana, segmentos_ruta, waypoints, 
             id_usuario, {'Alto': 'red', 'Medio': 'orange', 'Bajo': 'green', 'Desconocido': 'gray'}, 
             ongs_cercanas, siguiente_recomendacion
         )
-        
         return map_html
 
     except Exception as e:
