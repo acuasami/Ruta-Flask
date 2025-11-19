@@ -1,14 +1,12 @@
+# nixpacks.toml
+
+# ✅ SOLUCIÓN FINAL: Usamos el sistema APT nativo para asegurar la compatibilidad con las librerías C/C++.
+# Esto a menudo resuelve los fallos de enlace que NixPkgs no puede.
 [phases.setup]
-# Usamos NixPkgs para asegurar que GDAL y GEOS estén instalados
-nixPkgs = [
-  "gdal",    
-  "geos"
-]
+aptPackages = ["libgdal-dev", "libgeos-dev"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-# ✅ SOLUCIÓN CRÍTICA: Configuramos la variable de ruta de librerías (LD_LIBRARY_PATH)
-# para que Gunicorn pueda encontrar las dependencias de GDAL/GEOS en tiempo de ejecución.
-cmd = "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${NIX_BUILD_TOP}/lib/ && gunicorn --bind 0.0.0.0:$PORT app:app --workers 1"
+cmd = "gunicorn --bind 0.0.0.0:$PORT app:app --workers 1"
