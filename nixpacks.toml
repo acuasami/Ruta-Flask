@@ -1,16 +1,12 @@
-# nixpacks.toml
+# nixpacks.toml (Versión Final)
 
-# Incluimos los paquetes de sistema GEOS y GDAL que necesita Python.
-# Hemos eliminado las líneas de "export" que estaban causando el conflicto de compilación.
 [phases.setup]
 nixPkgs = [
   "gdal",    
-  "geos",     
-  "pkg-config" # Ayuda al compilador a encontrar las librerías
+  "geos"
 ]
 
 [phases.install]
-# Simplemente le pedimos a pip que instale, confiando en que Nix ya ha configurado las rutas.
 cmds = ["pip install -r requirements.txt"]
 
 [start]
