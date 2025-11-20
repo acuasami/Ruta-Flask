@@ -20,12 +20,11 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # Si la variable de entorno existe (Render), la usamos directamente.
 if DATABASE_URL:
     FINAL_DATABASE_URL = DATABASE_URL
-# Si no existe (fallback para pruebas locales), usamos el valor por defecto.
+# Si no existe (fallback para pruebas locales), usamos un valor por defecto.
 else:
     FINAL_DATABASE_URL = "postgresql://user:password@localhost:5432/mydatabase"
-    
-engine = create_engine(FINAL_DATABASE_URL) # La línea que usa 'engine' queda igual
 
+# Crear el motor de base de datos
 engine = create_engine(FINAL_DATABASE_URL)
 
 # --- 2. FUNCIONES DE LÓGICA ---
@@ -39,7 +38,6 @@ def conectar_y_leer_sql(query, params=None):
         return pd.DataFrame()
 
 def cargar_waypoints_ongs():
-    # ✅ CORREGIDO: Usa 'id_municipio' (singular) como indicaste en tu esquema
     query = text("""
         SELECT o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
         FROM public.ongs o
@@ -138,52 +136,37 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
 
     return m.get_root().render()
 
-# --- 3. RUTAS Y LOGIN ---
+# --- 3. RUTAS PRINCIPALES ---
 
-# 🛑 RUTA INDEX CORREGIDA: Redirige al mapa directamente
 @app.route('/')
 def index():
-    # Redirige a la ruta principal del mapa con coordenadas de prueba
-    # Usamos ID=1 para evitar errores si no hay sesión
+    # Redirigir automáticamente al mapa con coordenadas por defecto (CDMX)
     return redirect(url_for('mapa', lat=19.325521, lon=-99.167807, id_usuario=1))
 
-# 🛑 RUTA LOGIN CORREGIDA: Ya no necesita existir si el login se hace en Android
 @app.route('/login', methods=['POST'])
 def login():
-    # Redirige a la ruta principal del mapa con coordenadas de prueba
-    # Puedes modificar esto para usar el ID de usuario si lo obtienes de los formularios.
+    # Login simulado: redirige al mapa directamente
     id_usuario = request.form.get('id_usuario', default=1, type=int)
     return redirect(url_for('mapa', lat=19.325521, lon=-99.167807, id_usuario=id_usuario))
-    
-# NUEVA RUTA DE DIAGNÓSTICO
+
+# RUTA DE DIAGNÓSTICO DB
 @app.route('/test-db')
 def test_db_connection():
     try:
-        # Intentar leer una pequeña cantidad de datos para probar la conexión
         query = text("SELECT COUNT(*) AS total_ongs FROM public.ongs;")
-        
-        # Usamos la función de conexión que ya está definida en app.py
         df = conectar_y_leer_sql(query) 
 
         if df.empty or 'total_ongs' not in df.columns:
-            return jsonify({"status": "ERROR", "message": "Conexión a BD OK, pero no se pudo leer la tabla 'ongs' o la tabla está vacía."}), 500
+            return jsonify({"status": "ERROR", "message": "Conexión OK, pero tabla vacía o ilegible."}), 500
         
         total = df['total_ongs'].iloc[0]
-        
-        # Si llega aquí, ¡la conexión funciona!
         return jsonify({
             "status": "OK", 
             "message": "¡Conexión a la base de datos exitosa!",
-            "total_ongs": int(total),
-            "next_step": "El problema es la memoria (RAM) o el cálculo geoespacial."
+            "total_ongs": int(total)
         }), 200
     except Exception as e:
-        # Si falla, el problema es la URL/Credenciales
-        return jsonify({
-            "status": "DB_CONNECTION_FAILED", 
-            "error_details": str(e),
-            "solution": "Revisar la variable DATABASE_URL en Render."
-        }), 500
+        return jsonify({"status": "DB_CONNECTION_FAILED", "error_details": str(e)}), 500
 
 @app.route('/mapa')
 def mapa():
@@ -202,7 +185,7 @@ def mapa():
         riesgo_por_municipio_nombre = cargar_datos_riesgo()
         
         if not waypoints: 
-            return "Error: No hay ONGs en la base de datos (Tabla vacía o error de conexión).", 500
+            return "Error: No hay ONGs en la base de datos (o error de conexión).", 500
 
         # Lógica de negocio
         ong_cercana = ong_mas_cercana(start_point, waypoints)
@@ -213,7 +196,7 @@ def mapa():
         siguiente_recomendacion = ongs_ordenadas[1] if len(ongs_ordenadas) > 1 else None
         ongs_cercanas = ongs_ordenadas[:5]
 
-        # Cálculo de Ruta
+        # Cálculo de Ruta (Simplificado con try-except para evitar crasheos)
         segmentos_ruta = []
         try:
             dest_point = (ong_cercana['lat'], ong_cercana['lon'])
@@ -232,14 +215,13 @@ def mapa():
             route = nx.astar_path(G, orig_node, dest_node, weight='length')
             route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
             
-            # Segmentación por riesgo
+            # Segmentación
             segmento_actual = []
             municipio_actual = None
             riesgo_actual = 'Desconocido'
             
             for coord in route_coords:
                 municipio = obtener_municipio_por_proximidad(coord[0], coord[1], waypoints)
-                
                 if municipio_actual is None: 
                     municipio_actual = municipio
                     riesgo_actual = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
@@ -266,6 +248,7 @@ def mapa():
 
         except Exception as e:
             print(f"⚠️ Advertencia Ruta: {e}")
+            # Si falla el cálculo de ruta, enviamos listas vacías pero NO crasheamos
             segmentos_ruta = []
 
         map_html = generar_mapa_movil_con_recomendaciones(
@@ -278,6 +261,3 @@ def mapa():
     except Exception as e:
         print(f"💥 Error fatal: {e}")
         return f"Error del servidor: {e}", 500
-
-
-
