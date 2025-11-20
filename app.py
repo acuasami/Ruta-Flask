@@ -170,6 +170,36 @@ def login():
     except Exception as e:
         print(f"💥 Error en Login: {e}")
         return jsonify({"error_code": "DB_ERROR", "message": str(e)}), 500
+        
+# NUEVA RUTA DE DIAGNÓSTICO
+@app.route('/test-db')
+def test_db_connection():
+    try:
+        # Intentar leer una pequeña cantidad de datos para probar la conexión
+        query = text("SELECT COUNT(*) AS total_ongs FROM public.ongs;")
+        
+        # Usamos la función de conexión que ya está definida en app.py
+        df = conectar_y_leer_sql(query) 
+
+        if df.empty or 'total_ongs' not in df.columns:
+            return jsonify({"status": "ERROR", "message": "Conexión a BD OK, pero no se pudo leer la tabla 'ongs' o la tabla está vacía."}), 500
+        
+        total = df['total_ongs'].iloc[0]
+        
+        # Si llega aquí, ¡la conexión funciona!
+        return jsonify({
+            "status": "OK", 
+            "message": "¡Conexión a la base de datos exitosa!",
+            "total_ongs": int(total),
+            "next_step": "El problema es la memoria (RAM) o el cálculo geoespacial."
+        }), 200
+    except Exception as e:
+        # Si falla, el problema es la URL/Credenciales
+        return jsonify({
+            "status": "DB_CONNECTION_FAILED", 
+            "error_details": str(e),
+            "solution": "Revisar la variable DATABASE_URL en Render."
+        }), 500
 
 @app.route('/mapa')
 def mapa():
@@ -264,4 +294,5 @@ def mapa():
     except Exception as e:
         print(f"💥 Error fatal: {e}")
         return f"Error del servidor: {e}", 500
+
 
