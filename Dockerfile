@@ -11,5 +11,5 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
-CMD gunicorn --bind 0.0.0.0:$PORT app:app --workers 1
-
+# Aumentamos el timeout a 120 segundos (2 minutos) para dar tiempo a osmnx
+CMD gunicorn --bind 0.0.0.0:$PORT app:app --workers 1 --timeout 120
