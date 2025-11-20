@@ -1,18 +1,17 @@
-# requirements.txt
-matplotlib==3.9.2
-scikit-learn==1.3.2
+# requirements.txt ACTUALIZADO Y COMPATIBLE
 Flask==2.3.3
+Flask-CORS==4.0.0
 pandas==2.0.3
-osmnx==1.3.0      # ACT.: Versión compatible con Shapely 2.0+
+osmnx==1.6.0          # ✅ Versión actualizada y compatible
 networkx==3.1
-geopy==2.3.0
 folium==0.14.0
-shapely==2.0.1
-geopandas==0.13.2 
-numpy==1.24.3
-psycopg2-binary==2.9.7
+geopy==2.3.0
 SQLAlchemy==2.0.23
-geographiclib==2.0
+psycopg2-binary==2.9.7
 requests==2.31.0
-flask-cors
-gunicorn
+gunicorn==21.2.0
+matplotlib==3.7.2
+scikit-learn==1.3.2
+geopandas==0.13.2
+numpy==1.24.3
+sh
