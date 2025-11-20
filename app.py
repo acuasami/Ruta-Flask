@@ -140,37 +140,21 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
 
 # --- 3. RUTAS Y LOGIN ---
 
+# 🛑 RUTA INDEX CORREGIDA: Redirige al mapa directamente
 @app.route('/')
 def index():
-    return render_template('login.html')
+    # Redirige a la ruta principal del mapa con coordenadas de prueba
+    # Usamos ID=1 para evitar errores si no hay sesión
+    return redirect(url_for('mapa', lat=19.325521, lon=-99.167807, id_usuario=1))
 
+# 🛑 RUTA LOGIN CORREGIDA: Ya no necesita existir si el login se hace en Android
 @app.route('/login', methods=['POST'])
 def login():
-    usuario = request.form.get('usuario')
-    password_input = request.form.get('password')
-
-    if not usuario or not password_input:
-        return jsonify({"error": "Datos incompletos"}), 400
-
-    try:
-        with engine.connect() as connection:
-            # ✅ CORRECCIÓN: Tabla 'usuario' y columna 'constraseña' (tal como pediste)
-            query = text("""
-                SELECT id_usuario 
-                FROM usuario 
-                WHERE nombre_usuario = :usuario AND constraseña = :password
-            """)
-            result = connection.execute(query, {"usuario": usuario, "password": password_input}).fetchone()
-
-            if result:
-                return redirect(url_for('mapa', id_usuario=result[0]))
-            else:
-                return render_template('login.html', error="Usuario o contraseña incorrectos")
-
-    except Exception as e:
-        print(f"💥 Error en Login: {e}")
-        return jsonify({"error_code": "DB_ERROR", "message": str(e)}), 500
-        
+    # Redirige a la ruta principal del mapa con coordenadas de prueba
+    # Puedes modificar esto para usar el ID de usuario si lo obtienes de los formularios.
+    id_usuario = request.form.get('id_usuario', default=1, type=int)
+    return redirect(url_for('mapa', lat=19.325521, lon=-99.167807, id_usuario=id_usuario))
+    
 # NUEVA RUTA DE DIAGNÓSTICO
 @app.route('/test-db')
 def test_db_connection():
@@ -294,5 +278,6 @@ def mapa():
     except Exception as e:
         print(f"💥 Error fatal: {e}")
         return f"Error del servidor: {e}", 500
+
 
 
