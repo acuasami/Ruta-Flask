@@ -1,17 +1,12 @@
-# requirements.txt ACTUALIZADO Y COMPATIBLE
-Flask==2.3.3
-Flask-CORS==4.0.0
-pandas==2.0.3
-osmnx==1.6.0          # ✅ Versión actualizada y compatible
-networkx==3.1
-folium==0.14.0
-geopy==2.3.0
-SQLAlchemy==2.0.23
-psycopg2-binary==2.9.7
-requests==2.31.0
+flask==2.3.3
+pandas==2.2.3
+osmnx==1.9.4
+networkx==3.3
+shapely==2.0.4
+matplotlib==3.9.2
+geopy==2.4.1
+folium==0.17.0
+psycopg2-binary==2.9.9
+geopandas==0.14.4
+requests==2.32.4
 gunicorn==21.2.0
-matplotlib==3.7.2
-scikit-learn==1.3.2
-geopandas==0.13.2
-numpy==1.24.3
-sh
