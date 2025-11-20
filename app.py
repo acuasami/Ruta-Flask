@@ -200,7 +200,7 @@ def mapa():
         segmentos_ruta = []
         try:
             dest_point = (ong_cercana['lat'], ong_cercana['lon'])
-            padding = 0.02 
+            padding = 0.005 
             
             G = ox.graph_from_bbox(
                 max(lat, dest_point[0]) + padding, min(lat, dest_point[0]) - padding, 
@@ -261,3 +261,4 @@ def mapa():
     except Exception as e:
         print(f"💥 Error fatal: {e}")
         return f"Error del servidor: {e}", 500
+
