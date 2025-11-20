@@ -197,10 +197,74 @@ def mapa():
         ongs_cercanas = ongs_ordenadas[:5]
 
         # Cálculo de Ruta (Simplificado con try-except para evitar crasheos)
+        # --- VERSIÓN OPTIMIZADA PARA AHORRAR MEMORIA RAM ---
         segmentos_ruta = []
         try:
             dest_point = (ong_cercana['lat'], ong_cercana['lon'])
-            padding = 0.005 
+            
+            # 1. Calcular distancia lineal primero para evitar sobrecarga
+            distancia_lineal = geodesic(start_point, dest_point).km
+            
+            # SI LA DISTANCIA ES MAYOR A 15 KM, EVITAR CÁLCULO PESADO (Prevención de Crasheo)
+            if distancia_lineal > 15:
+                 print("⚠️ Distancia muy larga para servidor gratuito. Saltando cálculo detallado.")
+                 # Aquí podrías simplemente dibujar una línea recta si quisieras, 
+                 # pero por ahora dejamos la lista vacía para que no falle.
+            else:
+                # 2. REDUCIMOS EL PADDING (Margen) DRÁSTICAMENTE
+                # Antes: 0.02 (~2.2km) -> Causa OOM (Out of Memory)
+                # Ahora: 0.003 (~300m) -> Suficiente para la calle y mucho más ligero
+                padding = 0.003 
+                
+                G = ox.graph_from_bbox(
+                    max(lat, dest_point[0]) + padding, min(lat, dest_point[0]) - padding, 
+                    max(lon, dest_point[1]) + padding, min(lon, dest_point[1]) - padding, 
+                    network_type="drive"
+                )
+                G = ox.distance.add_edge_lengths(G)
+                
+                orig_node = ox.distance.nearest_nodes(G, lon, lat)
+                dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
+                
+                route = nx.astar_path(G, orig_node, dest_node, weight='length')
+                route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
+                
+                # Segmentación por riesgo (Lógica original)
+                segmento_actual = []
+                municipio_actual = None
+                riesgo_actual = 'Desconocido'
+                
+                for coord in route_coords:
+                    municipio = obtener_municipio_por_proximidad(coord[0], coord[1], waypoints)
+                    
+                    if municipio_actual is None: 
+                        municipio_actual = municipio
+                        riesgo_actual = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
+
+                    if municipio != municipio_actual:
+                        if segmento_actual:
+                            segmentos_ruta.append({
+                                'coords': segmento_actual, 
+                                'municipio': municipio_actual, 
+                                'grado_riesgo': riesgo_actual
+                            })
+                        municipio_actual = municipio
+                        riesgo_actual = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
+                        segmento_actual = [coord]
+                    else:
+                        segmento_actual.append(coord)
+                
+                if segmento_actual:
+                    segmentos_ruta.append({
+                        'coords': segmento_actual, 
+                        'municipio': municipio_actual, 
+                        'grado_riesgo': riesgo_actual
+                    })
+
+        except Exception as e:
+            print(f"⚠️ Advertencia Ruta (Memoria o error): {e}")
+            # No hacemos 'raise' para que el servidor NO se caiga y al menos muestre el mapa y marcadores
+            segmentos_ruta = []
             
             G = ox.graph_from_bbox(
                 max(lat, dest_point[0]) + padding, min(lat, dest_point[0]) - padding, 
@@ -261,4 +325,5 @@ def mapa():
     except Exception as e:
         print(f"💥 Error fatal: {e}")
         return f"Error del servidor: {e}", 500
+
 
