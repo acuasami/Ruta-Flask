@@ -11,5 +11,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
-# Aumentamos el timeout a 120 segundos (2 minutos) para dar tiempo a osmnx
+# Usar timeout de 120 segundos para evitar el error "CRITICAL WORKER TIMEOUT"
 CMD gunicorn --bind 0.0.0.0:$PORT app:app --workers 1 --timeout 120
+
