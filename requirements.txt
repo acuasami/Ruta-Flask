@@ -11,3 +11,4 @@ geopandas==0.14.4
 requests==2.32.4
 gunicorn==21.2.0
 numpy==1.26.4
+pyproj==3.6.1
