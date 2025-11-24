@@ -22,15 +22,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copiar aplicación (Asegúrate de que hay un espacio entre los puntos)
+# Copiar aplicación
 COPY . .
 
-# Render ignora EXPOSE, pero puedes dejarlo documentado o comentado
-# EXPOSE 5000
-
-# --- CAMBIO CRÍTICO PARA RENDER ---
-# Usamos 'sh -c' para poder leer la variable de entorno $PORT.
-# Si $PORT no está definida (localmente), usa 5000 por defecto.
-CMD sh -c "gunicorn --bind 0.0.0.0:${PORT:-5000} app:app"
-
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+# --- SOLO UN CMD ---
+# Usa la variable PORT (Render la establece en 10000) o 5000 por defecto
+CMD gunicorn --bind 0.0.0.0:${PORT:-5000} --timeout 120 app:app
