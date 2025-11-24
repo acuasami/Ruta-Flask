@@ -2,7 +2,7 @@ FROM python:3.11-slim-bullseye
 
 WORKDIR /app
 
-# Instalar dependencias del sistema necesarias para GDAL/GEOS
+# 1. Instalar librerías de sistema (APT) necesarias para GDAL/GEOS
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
