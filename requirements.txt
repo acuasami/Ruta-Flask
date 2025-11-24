@@ -1,4 +1,5 @@
 flask==2.3.3
+flask-cors==4.0.0
 pandas==2.2.3
 osmnx==1.9.4
 networkx==3.3
