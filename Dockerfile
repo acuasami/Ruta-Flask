@@ -1,22 +1,27 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Instalar dependencias del sistema necesarias para OSMnx y otras bibliotecas geo
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
+# Instalar dependencias básicas primero
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar requirements primero para cachear las dependencias
+# Instalar dependencias geoespaciales en un paso separado
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgdal-dev \
+    gdal-bin \
+    libgeos-dev \
+    proj-bin \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar el resto de la aplicación
+# Copiar aplicación
 COPY . .
 
-# Exponer el puerto
 EXPOSE 5000
-
-# Comando para ejecutar la aplicación
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
