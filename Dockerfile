@@ -25,6 +25,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copiar aplicación
 COPY . .
 
-# --- SOLO UN CMD ---
-# Usa la variable PORT (Render la establece en 10000) o 5000 por defecto
-CMD gunicorn --bind 0.0.0.0:${PORT:-5000} --timeout 120 app:app
+# --- SOLUCIÓN DEFINITIVA ---
+# Usar gunicorn con el archivo app.py y la aplicación 'app'
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--timeout", "120", "app:app"]
