@@ -525,14 +525,9 @@ def not_found(error):
 def internal_error(error):
     return jsonify({"error": "Error interno del servidor"}), 500
 
+# Al final de tu app.py
 if __name__ == '__main__':
-    # Usar 10000 para Render, 5000 para desarrollo local
-    port = int(os.environ.get('PORT', 5000))
-    
-    # Si estamos en un entorno de producción (como Render), forzar puerto 10000
-    if os.environ.get('RENDER', None):
-        port = 10000
-    
+    port = int(os.environ.get('PORT', 10000))  # ← 10000 no 5000
     debug = os.environ.get('DEBUG', 'False').lower() == 'true'
     
     logger.info(f"🚀 Iniciando servidor en puerto {port}")
