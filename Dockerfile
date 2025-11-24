@@ -1,17 +1,12 @@
-FROM python:3.11-slim-bullseye
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# 1. Instalar librerías de sistema (APT) necesarias para GDAL/GEOS
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
-    libgdal-dev \
-    libgeos-dev \
-    gdal-bin \
-    proj-bin && \
-    rm -rf /var/lib/apt/lists/*
+# Instalar dependencias del sistema necesarias para OSMnx y otras bibliotecas geo
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copiar requirements primero para cachear las dependencias
 COPY requirements.txt .
