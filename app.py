@@ -10,6 +10,8 @@ import os
 import math
 from functools import lru_cache
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -26,10 +28,13 @@ DB_CONFIG = {
     'dbname': 'railway'
 }
 
-# Configuración de OSM
-ox.settings.log_console = True
+# Configuración de OSM optimizada
+ox.settings.log_console = False  # Reducir logs
 ox.settings.use_cache = True
-ox.settings.timeout = 300
+ox.settings.timeout = 180  # 3 minutos máximo
+
+# Thread pool para operaciones concurrentes
+executor = ThreadPoolExecutor(max_workers=2)
 
 @lru_cache(maxsize=1)
 def cargar_datos_ongs():
@@ -38,11 +43,12 @@ def cargar_datos_ongs():
         logger.info("📂 Cargando datos de ONGs desde la base de datos...")
         conn = psycopg2.connect(**DB_CONFIG)
         
-        # Consulta para ONGs
+        # Consulta optimizada
         query_ongs = """
         SELECT o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
         FROM public.ongs o
-        JOIN public.municipio m ON o.id_municipio = m.id_municipio;
+        JOIN public.municipio m ON o.id_municipio = m.id_municipio
+        WHERE o.latitud IS NOT NULL AND o.longitud IS NOT NULL;
         """
         df_ongs = pd.read_sql(query_ongs, conn)
         
@@ -96,17 +102,7 @@ def haversine_heuristic(u, v, G):
     try:
         lat1, lon1 = G.nodes[u]['y'], G.nodes[u]['x']
         lat2, lon2 = G.nodes[v]['y'], G.nodes[v]['x']
-        R = 6371000  # Radio de la Tierra en metros
-        
-        phi1 = math.radians(lat1)
-        phi2 = math.radians(lat2)
-        dphi = math.radians(lat2 - lat1)
-        dlambda = math.radians(lon2 - lon1)
-        
-        a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-        
-        return R * c
+        return geodesic((lat1, lon1), (lat2, lon2)).meters
     except Exception as e:
         logger.error(f"Error en heurística: {e}")
         return float('inf')
@@ -119,12 +115,21 @@ def ong_mas_cercana(pos_actual, waypoints):
         if not ongs:
             return None
         
-        for o in ongs:
-            o['distancia'] = geodesic(pos_actual, (o['lat'], o['lon'])).kilometers
+        # Calcular distancias de forma más eficiente
+        min_distancia = float('inf')
+        mas_cercana = None
         
-        mas_cercana = min(ongs, key=lambda x: x['distancia'])
-        logger.info(f"📍 ONG más cercana: {mas_cercana['name']} ({mas_cercana['distancia']:.2f} km)")
-        return mas_cercana
+        for ong in ongs:
+            distancia = geodesic(pos_actual, (ong['lat'], ong['lon'])).kilometers
+            if distancia < min_distancia:
+                min_distancia = distancia
+                mas_cercana = ong.copy()
+                mas_cercana['distancia'] = distancia
+        
+        if mas_cercana:
+            logger.info(f"📍 ONG más cercana: {mas_cercana['name']} ({mas_cercana['distancia']:.2f} km)")
+            return mas_cercana
+        return None
         
     except Exception as e:
         logger.error(f"Error al encontrar ONG cercana: {e}")
@@ -156,62 +161,96 @@ def obtener_recomendacion_norte(start, waypoints, ong_actual):
                     "direccion_norte": ong["lat"] - start_lat
                 })
         
-        # Ordenar por distancia
-        candidates.sort(key=lambda x: x['distancia'])
-        return candidates[0] if candidates else None
+        # Ordenar por distancia y tomar la más cercana
+        if candidates:
+            candidates.sort(key=lambda x: x['distancia'])
+            return candidates[0]
+        return None
         
     except Exception as e:
         logger.error(f"Error al obtener recomendación: {e}")
         return None
 
-def calcular_ruta(start_point, dest_point):
-    """Calcula la ruta entre dos puntos usando OSMnx"""
+def calcular_ruta_optimizada(start_point, dest_point, timeout=120):
+    """Calcula la ruta entre dos puntos con timeout"""
+    def _calcular():
+        try:
+            # Calcular distancia para determinar el área de búsqueda
+            distance_km = geodesic(start_point, dest_point).km
+            
+            # Limitar área de búsqueda para mejorar performance
+            if distance_km > 100:
+                logger.warning(f"📍 Distancia muy grande ({distance_km} km), limitando búsqueda")
+                buffer_m = 50000  # 50km máximo
+            else:
+                buffer_m = min((distance_km + 5) * 1000, 50000)  # Máximo 50km
+            
+            logger.info(f"🗺️ Descargando grafo OSM para área de {buffer_m/1000:.1f}km...")
+            
+            # Intentar con diferentes tipos de red si falla
+            try:
+                G = ox.graph_from_point(
+                    start_point, 
+                    dist=buffer_m, 
+                    network_type="drive",
+                    simplify=True,
+                    retain_all=False
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Error con red 'drive', intentando con 'all': {e}")
+                G = ox.graph_from_point(
+                    start_point, 
+                    dist=buffer_m, 
+                    network_type="all",
+                    simplify=True,
+                    retain_all=False
+                )
+            
+            if len(G.nodes) == 0:
+                raise Exception("No se pudo obtener datos de OSM para esta área")
+            
+            # Encontrar nodos más cercanos
+            orig_node = ox.distance.nearest_nodes(G, start_point[1], start_point[0])
+            dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
+            
+            logger.info("🔄 Calculando ruta con algoritmo A*...")
+            
+            # Calcular ruta con A*
+            route = nx.astar_path(
+                G,
+                orig_node,
+                dest_node,
+                heuristic=lambda u, v: haversine_heuristic(u, v, G),
+                weight='length'
+            )
+            
+            # Convertir a coordenadas
+            route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
+            
+            logger.info(f"✅ Ruta calculada con {len(route)} nodos")
+            return route_coords, G
+            
+        except Exception as e:
+            logger.error(f"❌ Error al calcular ruta: {e}")
+            raise
+    
+    # Ejecutar con timeout
     try:
-        # Calcular distancia para determinar el área de búsqueda
-        distance_km = geodesic(start_point, dest_point).km
-        buffer_m = (distance_km + 0.5) * 1000  # +500m de margen
-        
-        logger.info(f"🗺️ Descargando grafo OSM para área de {buffer_m:.0f}m...")
-        
-        # Descargar grafo
-        G = ox.graph_from_point(
-            start_point, 
-            dist=buffer_m, 
-            network_type="drive",
-            simplify=True
-        )
-        
-        # Encontrar nodos más cercanos
-        orig_node = ox.distance.nearest_nodes(G, start_point[1], start_point[0])
-        dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
-        
-        logger.info("🔄 Calculando ruta con algoritmo A*...")
-        
-        # Calcular ruta con A*
-        route = nx.astar_path(
-            G,
-            orig_node,
-            dest_node,
-            heuristic=lambda u, v: haversine_heuristic(u, v, G),
-            weight='length'
-        )
-        
-        # Convertir a coordenadas
-        route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
-        
-        logger.info(f"✅ Ruta calculada con {len(route)} nodos")
-        return route_coords, G
-        
-    except Exception as e:
-        logger.error(f"❌ Error al calcular ruta: {e}")
-        raise e
+        future = executor.submit(_calcular)
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        logger.error("⏰ Timeout calculando ruta")
+        raise Exception("Tiempo de espera agotado al calcular la ruta")
 
-def generar_mapa_completo(start, ong_cercana, waypoints, riesgo_por_municipio, route_coords, recomendacion=None):
+def generar_mapa_completo(start, ong_cercana, waypoints, riesgo_por_municipio, route_coords=None, recomendacion=None):
     """Genera el mapa HTML completo con todos los elementos"""
     try:
-        # Crear mapa base
+        # Crear mapa base centrado en el punto medio entre start y destino
+        center_lat = (start[0] + ong_cercana['lat']) / 2
+        center_lon = (start[1] + ong_cercana['lon']) / 2
+        
         m = folium.Map(
-            location=start,
+            location=[center_lat, center_lon],
             zoom_start=12,
             tiles="CartoDB positron",
             width='100%',
@@ -233,6 +272,16 @@ def generar_mapa_completo(start, ong_cercana, waypoints, riesgo_por_municipio, r
                 opacity=0.8,
                 tooltip="Ruta hacia la ONG más cercana"
             ).add_to(m)
+        else:
+            # Si no hay ruta, dibujar línea recta
+            folium.PolyLine(
+                [start, [ong_cercana['lat'], ong_cercana['lon']]],
+                color='#4A00E0',
+                weight=3,
+                opacity=0.5,
+                dash_array='5, 5',
+                tooltip="Línea directa (ruta no disponible)"
+            ).add_to(m)
         
         # --- MARCADOR DEL USUARIO ---
         folium.Marker(
@@ -246,6 +295,7 @@ def generar_mapa_completo(start, ong_cercana, waypoints, riesgo_por_municipio, r
                     <p><b>Lat:</b> {start[0]:.4f}</p>
                     <p><b>Lon:</b> {start[1]:.4f}</p>
                     <p><b>Destino:</b> {ong_cercana['name']}</p>
+                    <p><b>Distancia:</b> {ong_cercana['distancia']:.1f} km</p>
                 </div>
                 """,
                 max_width=300
@@ -300,9 +350,9 @@ def generar_mapa_completo(start, ong_cercana, waypoints, riesgo_por_municipio, r
                 icon=folium.Icon(color="orange", icon="star", prefix="fa")
             ).add_to(m)
         
-        # --- OTRAS ONGs ---
+        # --- OTRAS ONGs (máximo 20 para no saturar) ---
         ongs_marcadas = 0
-        for ong in waypoints:
+        for ong in waypoints[:20]:  # Limitar a 20 ONGs
             if ong['name'] != ong_cercana['name'] and (not recomendacion or ong['name'] != recomendacion.get('name')):
                 color_ong = {
                     'Albergue': 'lightblue',
@@ -431,9 +481,15 @@ def calcular_ruta_endpoint():
         # Obtener recomendación
         recomendacion = obtener_recomendacion_norte(start_point, waypoints, ong_cercana)
         
-        # Calcular ruta
+        # Calcular ruta con timeout
         dest_point = (ong_cercana['lat'], ong_cercana['lon'])
-        route_coords, G = calcular_ruta(start_point, dest_point)
+        route_coords = None
+        
+        try:
+            route_coords, G = calcular_ruta_optimizada(start_point, dest_point, timeout=120)
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo calcular ruta detallada: {e}")
+            # Continuar sin ruta detallada
         
         # Generar mapa
         mapa = generar_mapa_completo(
@@ -471,6 +527,8 @@ def calcular_ruta_endpoint():
 @app.route('/calcular-ruta-json', methods=['POST'])
 def calcular_ruta_json():
     """Endpoint alternativo que devuelve JSON en lugar de HTML"""
+    start_time = time.time()
+    
     try:
         data = request.get_json()
         
@@ -498,8 +556,12 @@ def calcular_ruta_json():
         # Obtener recomendación
         recomendacion = obtener_recomendacion_norte(start_point, waypoints, ong_cercana)
         
+        processing_time = time.time() - start_time
+        logger.info(f"✅ Respuesta JSON generada en {processing_time:.2f} segundos")
+        
         return jsonify({
             "success": True,
+            "processing_time": processing_time,
             "usuario": {"lat": lat, "lon": lon},
             "ong_destino": {
                 "nombre": ong_cercana['name'],
@@ -507,13 +569,14 @@ def calcular_ruta_json():
                 "municipio": ong_cercana.get('municipio', 'Desconocido'),
                 "lat": ong_cercana['lat'],
                 "lon": ong_cercana['lon'],
-                "distancia_km": ong_cercana['distancia']
+                "distancia_km": round(ong_cercana['distancia'], 2)
             },
             "recomendacion": recomendacion,
             "total_ongs": len(waypoints)
         })
         
     except Exception as e:
+        logger.error(f"❌ Error en endpoint JSON: {e}")
         return jsonify({"error": f"Error interno: {str(e)}"}), 500
 
 # Manejo de errores
@@ -525,11 +588,9 @@ def not_found(error):
 def internal_error(error):
     return jsonify({"error": "Error interno del servidor"}), 500
 
-# Al final de tu app.py
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))  # ← 10000 no 5000
+    port = int(os.environ.get('PORT', 10000))
     debug = os.environ.get('DEBUG', 'False').lower() == 'true'
     
-    logger.info(f"🚀 Iniciando servidor en puerto {port}")
+    logger.info(f"🚀 Iniciando servidor optimizado en puerto {port}")
     app.run(host='0.0.0.0', port=port, debug=debug)
-
