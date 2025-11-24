@@ -1,596 +1,277 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
+import math
 import pandas as pd
 import osmnx as ox
 import networkx as nx
+import psycopg2
 from geopy.distance import geodesic
 import folium
-import psycopg2
-import logging
-import os
-import math
-from functools import lru_cache
-import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from urllib.parse import urlparse
 
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+app = Flask(_name_)
+CORS(app)  # Permitir requests desde Android
 
-app = Flask(__name__)
-
-# Configuración de la base de datos
+# --- CONFIGURACIÓN DE BASE DE DATOS ---
+uri = 'postgresql://postgres:KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ@switchyard.proxy.rlwy.net:13155/railway'
+result = urlparse(uri)
 DB_CONFIG = {
-    'user': 'postgres',
-    'password': 'KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ',
-    'host': 'switchyard.proxy.rlwy.net',
-    'port': '13155',
-    'dbname': 'railway'
+    'user': result.username,
+    'password': result.password,
+    'host': result.hostname,
+    'port': result.port,
+    'dbname': result.path.lstrip('/')
 }
 
-# Configuración de OSM optimizada
-ox.settings.log_console = False  # Reducir logs
-ox.settings.use_cache = True
-ox.settings.timeout = 180  # 3 minutos máximo
+# --- CARGAR DATOS AL INICIAR EL SERVIDOR ---
+print("🔄 Cargando datos iniciales...")
 
-# Thread pool para operaciones concurrentes
-executor = ThreadPoolExecutor(max_workers=2)
-
-@lru_cache(maxsize=1)
-def cargar_datos_ongs():
-    """Carga los datos de ONGs desde la base de datos con cache"""
-    try:
-        logger.info("📂 Cargando datos de ONGs desde la base de datos...")
-        conn = psycopg2.connect(**DB_CONFIG)
-        
-        # Consulta optimizada
-        query_ongs = """
-        SELECT o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
-        FROM public.ongs o
-        JOIN public.municipio m ON o.id_municipio = m.id_municipio
-        WHERE o.latitud IS NOT NULL AND o.longitud IS NOT NULL;
-        """
-        df_ongs = pd.read_sql(query_ongs, conn)
-        
-        # Consulta para riesgo
-        query_riesgo = """
-        SELECT DISTINCT ON (f.id_municipio) 
-               f.id_municipio, f.grado, m.nom_municipio
-        FROM public.fecha f
-        JOIN public.municipio m ON f.id_municipio = m.id_municipio
-        ORDER BY f.id_municipio, f.fecha DESC;
-        """
-        df_riesgo = pd.read_sql(query_riesgo, conn)
-        conn.close()
-        
-        # Procesar datos de ONGs
-        df_ongs.rename(columns={
-            'nom_ong': 'name', 'tipo': 'type', 'latitud': 'lat', 
-            'longitud': 'lon', 'nom_municipio': 'municipio'
-        }, inplace=True)
-        
-        # Convertir coordenadas a numérico
-        df_ongs['lat'] = pd.to_numeric(df_ongs['lat'], errors='coerce')
-        df_ongs['lon'] = pd.to_numeric(df_ongs['lon'], errors='coerce')
-        df_ongs = df_ongs.dropna(subset=['lat', 'lon'])
-        
-        # Crear lista de waypoints
-        waypoints = []
-        for _, row in df_ongs.iterrows():
-            waypoints.append({
-                'name': row['name'],
-                'type': row['type'],
-                'lat': float(row['lat']),
-                'lon': float(row['lon']),
-                'municipio': row['municipio']
-            })
-        
-        # Crear diccionario de riesgo
-        riesgo_por_municipio = {}
-        for _, row in df_riesgo.iterrows():
-            riesgo_por_municipio[row['nom_municipio']] = row['grado']
-        
-        logger.info(f"✅ Cargadas {len(waypoints)} ONGs y {len(riesgo_por_municipio)} municipios con riesgo")
-        return waypoints, riesgo_por_municipio
-        
-    except Exception as e:
-        logger.error(f"❌ Error al cargar datos: {e}")
-        return [], {}
-
-def haversine_heuristic(u, v, G):
-    """Heurística de Haversine para el algoritmo A*"""
-    try:
-        lat1, lon1 = G.nodes[u]['y'], G.nodes[u]['x']
-        lat2, lon2 = G.nodes[v]['y'], G.nodes[v]['x']
-        return geodesic((lat1, lon1), (lat2, lon2)).meters
-    except Exception as e:
-        logger.error(f"Error en heurística: {e}")
-        return float('inf')
-
-def ong_mas_cercana(pos_actual, waypoints):
-    """Encuentra la ONG más cercana a la posición actual"""
-    try:
-        ongs = [w for w in waypoints if str(w.get('type', '')).strip().lower() != 'frontera']
-        
-        if not ongs:
-            return None
-        
-        # Calcular distancias de forma más eficiente
-        min_distancia = float('inf')
-        mas_cercana = None
-        
-        for ong in ongs:
-            distancia = geodesic(pos_actual, (ong['lat'], ong['lon'])).kilometers
-            if distancia < min_distancia:
-                min_distancia = distancia
-                mas_cercana = ong.copy()
-                mas_cercana['distancia'] = distancia
-        
-        if mas_cercana:
-            logger.info(f"📍 ONG más cercana: {mas_cercana['name']} ({mas_cercana['distancia']:.2f} km)")
-            return mas_cercana
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error al encontrar ONG cercana: {e}")
-        return None
-
-def obtener_recomendacion_norte(start, waypoints, ong_actual):
-    """Encuentra ONGs al norte para recomendación"""
-    try:
-        start_lat, start_lon = start
-        candidates = []
-        
-        for ong in waypoints:
-            # Excluir fronteras y la ONG actual
-            if str(ong.get('type', '')).strip().lower() == 'frontera':
-                continue
-            if ong_actual and ong['name'] == ong_actual.get('name'):
-                continue
-            
-            # Verificar que esté al norte
-            if ong["lat"] > start_lat:
-                distancia = geodesic(start, (ong["lat"], ong["lon"])).kilometers
-                candidates.append({
-                    "name": ong["name"],
-                    "lat": ong["lat"],
-                    "lon": ong["lon"],
-                    "type": ong["type"],
-                    "municipio": ong.get("municipio", "Desconocido"),
-                    "distancia": distancia,
-                    "direccion_norte": ong["lat"] - start_lat
-                })
-        
-        # Ordenar por distancia y tomar la más cercana
-        if candidates:
-            candidates.sort(key=lambda x: x['distancia'])
-            return candidates[0]
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error al obtener recomendación: {e}")
-        return None
-
-def calcular_ruta_optimizada(start_point, dest_point, timeout=120):
-    """Calcula la ruta entre dos puntos con timeout"""
-    def _calcular():
-        try:
-            # Calcular distancia para determinar el área de búsqueda
-            distance_km = geodesic(start_point, dest_point).km
-            
-            # Limitar área de búsqueda para mejorar performance
-            if distance_km > 100:
-                logger.warning(f"📍 Distancia muy grande ({distance_km} km), limitando búsqueda")
-                buffer_m = 50000  # 50km máximo
-            else:
-                buffer_m = min((distance_km + 5) * 1000, 50000)  # Máximo 50km
-            
-            logger.info(f"🗺️ Descargando grafo OSM para área de {buffer_m/1000:.1f}km...")
-            
-            # Intentar con diferentes tipos de red si falla
-            try:
-                G = ox.graph_from_point(
-                    start_point, 
-                    dist=buffer_m, 
-                    network_type="drive",
-                    simplify=True,
-                    retain_all=False
-                )
-            except Exception as e:
-                logger.warning(f"⚠️ Error con red 'drive', intentando con 'all': {e}")
-                G = ox.graph_from_point(
-                    start_point, 
-                    dist=buffer_m, 
-                    network_type="all",
-                    simplify=True,
-                    retain_all=False
-                )
-            
-            if len(G.nodes) == 0:
-                raise Exception("No se pudo obtener datos de OSM para esta área")
-            
-            # Encontrar nodos más cercanos
-            orig_node = ox.distance.nearest_nodes(G, start_point[1], start_point[0])
-            dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
-            
-            logger.info("🔄 Calculando ruta con algoritmo A*...")
-            
-            # Calcular ruta con A*
-            route = nx.astar_path(
-                G,
-                orig_node,
-                dest_node,
-                heuristic=lambda u, v: haversine_heuristic(u, v, G),
-                weight='length'
-            )
-            
-            # Convertir a coordenadas
-            route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
-            
-            logger.info(f"✅ Ruta calculada con {len(route)} nodos")
-            return route_coords, G
-            
-        except Exception as e:
-            logger.error(f"❌ Error al calcular ruta: {e}")
-            raise
+def cargar_datos_iniciales():
+    """Carga ONGs y datos de riesgo una vez al iniciar el servidor"""
+    # Cargar ONGs
+    QUERY_ONG = """
+    SELECT o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
+    FROM public.ongs o
+    JOIN public.municipio m ON o.id_municipio = m.id_municipio;
+    """
     
-    # Ejecutar con timeout
-    try:
-        future = executor.submit(_calcular)
-        return future.result(timeout=timeout)
-    except FutureTimeoutError:
-        logger.error("⏰ Timeout calculando ruta")
-        raise Exception("Tiempo de espera agotado al calcular la ruta")
-
-def generar_mapa_completo(start, ong_cercana, waypoints, riesgo_por_municipio, route_coords=None, recomendacion=None):
-    """Genera el mapa HTML completo con todos los elementos"""
-    try:
-        # Crear mapa base centrado en el punto medio entre start y destino
-        center_lat = (start[0] + ong_cercana['lat']) / 2
-        center_lon = (start[1] + ong_cercana['lon']) / 2
-        
-        m = folium.Map(
-            location=[center_lat, center_lon],
-            zoom_start=12,
-            tiles="CartoDB positron",
-            width='100%',
-            height='98vh'
-        )
-        
-        # Configuración para móviles
-        m.options['touchZoom'] = True
-        m.options['dragging'] = True
-        m.options['scrollWheelZoom'] = True
-        
-        # --- DIBUJAR RUTA ---
-        if route_coords and len(route_coords) > 1:
-            logger.info("🎨 Dibujando ruta en el mapa...")
-            folium.PolyLine(
-                route_coords,
-                color='#4A00E0',
-                weight=6,
-                opacity=0.8,
-                tooltip="Ruta hacia la ONG más cercana"
-            ).add_to(m)
-        else:
-            # Si no hay ruta, dibujar línea recta
-            folium.PolyLine(
-                [start, [ong_cercana['lat'], ong_cercana['lon']]],
-                color='#4A00E0',
-                weight=3,
-                opacity=0.5,
-                dash_array='5, 5',
-                tooltip="Línea directa (ruta no disponible)"
-            ).add_to(m)
-        
-        # --- MARCADOR DEL USUARIO ---
-        folium.Marker(
-            location=start,
-            popup=folium.Popup(
-                f"""
-                <div style='font-size:14px; max-width:250px;'>
-                    <div style='background:#4A00E0; color:white; padding:8px; border-radius:5px 5px 0 0; margin:-10px -10px 10px -10px;'>
-                        <b>📍 Tu Ubicación</b>
-                    </div>
-                    <p><b>Lat:</b> {start[0]:.4f}</p>
-                    <p><b>Lon:</b> {start[1]:.4f}</p>
-                    <p><b>Destino:</b> {ong_cercana['name']}</p>
-                    <p><b>Distancia:</b> {ong_cercana['distancia']:.1f} km</p>
-                </div>
-                """,
-                max_width=300
-            ),
-            tooltip="📍 Tu ubicación actual",
-            icon=folium.Icon(color="blue", icon="user", prefix="fa")
-        ).add_to(m)
-        
-        # --- MARCADOR ONG DESTINO ---
-        riesgo_ong = riesgo_por_municipio.get(ong_cercana.get('municipio', 'Desconocido'), 'Desconocido')
-        color_riesgo = {'Alto': 'red', 'Medio': 'orange', 'Bajo': 'green'}.get(riesgo_ong, 'gray')
-        
-        folium.Marker(
-            location=(ong_cercana['lat'], ong_cercana['lon']),
-            popup=folium.Popup(
-                f"""
-                <div style='font-size:14px; max-width:280px;'>
-                    <div style='background:{color_riesgo}; color:white; padding:8px; border-radius:5px 5px 0 0; margin:-10px -10px 10px -10px;'>
-                        <b>🏠 ONG Destino</b>
-                    </div>
-                    <p><b>Nombre:</b> {ong_cercana['name']}</p>
-                    <p><b>Tipo:</b> {ong_cercana['type']}</p>
-                    <p><b>Municipio:</b> {ong_cercana.get('municipio', 'Desconocido')}</p>
-                    <p><b>Riesgo:</b> {riesgo_ong}</p>
-                    <p><b>Distancia:</b> {ong_cercana['distancia']:.1f} km</p>
-                </div>
-                """,
-                max_width=320
-            ),
-            tooltip=f"🎯 {ong_cercana['name']}",
-            icon=folium.Icon(color="green", icon="home", prefix="fa")
-        ).add_to(m)
-        
-        # --- MARCADOR RECOMENDACIÓN ---
-        if recomendacion:
-            folium.Marker(
-                location=(recomendacion['lat'], recomendacion['lon']),
-                popup=folium.Popup(
-                    f"""
-                    <div style='font-size:14px; max-width:280px;'>
-                        <div style='background:#FF9800; color:white; padding:8px; border-radius:5px 5px 0 0; margin:-10px -10px 10px -10px;'>
-                            <b>⭐ Próxima Recomendación</b>
-                        </div>
-                        <p><b>Nombre:</b> {recomendacion['name']}</p>
-                        <p><b>Tipo:</b> {recomendacion['type']}</p>
-                        <p><b>Distancia:</b> {recomendacion['distancia']:.1f} km</p>
-                    </div>
-                    """,
-                    max_width=320
-                ),
-                tooltip=f"⭐ {recomendacion['name']}",
-                icon=folium.Icon(color="orange", icon="star", prefix="fa")
-            ).add_to(m)
-        
-        # --- OTRAS ONGs (máximo 20 para no saturar) ---
-        ongs_marcadas = 0
-        for ong in waypoints[:20]:  # Limitar a 20 ONGs
-            if ong['name'] != ong_cercana['name'] and (not recomendacion or ong['name'] != recomendacion.get('name')):
-                color_ong = {
-                    'Albergue': 'lightblue',
-                    'Comedor': 'orange',
-                    'Frontera': 'red',
-                    'default': 'gray'
-                }.get(ong.get('type', ''), 'gray')
-                
-                folium.CircleMarker(
-                    location=(ong['lat'], ong['lon']),
-                    radius=6,
-                    popup=folium.Popup(
-                        f"<b>{ong['name']}</b><br>{ong['type']}",
-                        max_width=200
-                    ),
-                    tooltip=ong['name'],
-                    color=color_ong,
-                    fillColor=color_ong,
-                    weight=2,
-                    fillOpacity=0.7
-                ).add_to(m)
-                ongs_marcadas += 1
-        
-        logger.info(f"📍 Marcadas {ongs_marcadas} ONGs adicionales")
-        
-        # --- LEYENDA ---
-        legend_html = '''
-        <div style="position: fixed; bottom: 20px; left: 10px; width: 220px; background: white; 
-                    border: 2px solid #4A00E0; z-index: 9999; font-size: 11px; padding: 10px; border-radius: 5px;">
-            <h4 style="margin:0 0 8px 0; color:#4A00E0; font-size:12px;">🗺️ Leyenda</h4>
-            <p style="margin:2px 0;">📍 Tu ubicación</p>
-            <p style="margin:2px 0;">🏠 ONG destino</p>
-            <p style="margin:2px 0;">⭐ Recomendación</p>
-            <p style="margin:2px 0;">● Otras ONGs</p>
-        </div>
-        '''
-        m.get_root().html.add_child(folium.Element(legend_html))
-        
-        return m
-        
-    except Exception as e:
-        logger.error(f"❌ Error al generar mapa: {e}")
-        raise e
-
-@app.route('/')
-def home():
-    """Página de inicio"""
-    return jsonify({
-        "message": "🚀 Servidor de Rutas para Migrantes - ONG Finder",
-        "version": "1.0",
-        "endpoints": {
-            "calcular_ruta": "POST /calcular-ruta",
-            "health": "GET /health",
-            "info": "GET /"
-        },
-        "usage": {
-            "calcular_ruta": "Envía JSON con {lat: xx.xx, lon: xx.xx}",
-            "response": "Devuelve HTML del mapa interactivo"
-        }
-    })
-
-@app.route('/health')
-def health_check():
-    """Endpoint de salud del servidor"""
-    try:
-        # Verificar conexión a la base de datos
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.close()
-        
-        return jsonify({
-            "status": "healthy",
-            "service": "ruta-migrante",
-            "database": "connected",
-            "timestamp": time.time()
+    conn = psycopg2.connect(**DB_CONFIG)
+    df_ongs = pd.read_sql(QUERY_ONG, conn)
+    
+    # Cargar datos de riesgo
+    QUERY_FECHA = "SELECT * FROM public.fecha;"
+    QUERY_MUNICIPIO = "SELECT * FROM public.municipio;"
+    
+    df_fecha = pd.read_sql(QUERY_FECHA, conn)
+    df_municipio = pd.read_sql(QUERY_MUNICIPIO, conn)
+    conn.close()
+    
+    # Procesar ONGs
+    df_ongs.rename(columns={
+        'nom_ong': 'name', 'tipo': 'type', 'latitud': 'lat', 
+        'longitud': 'lon', 'nom_municipio': 'municipio'
+    }, inplace=True)
+    
+    df_ongs['lat'] = pd.to_numeric(df_ongs['lat'], errors='coerce')
+    df_ongs['lon'] = pd.to_numeric(df_ongs['lon'], errors='coerce')
+    df_ongs = df_ongs.dropna(subset=['lat', 'lon'])
+    
+    waypoints = []
+    for _, row in df_ongs.iterrows():
+        waypoints.append({
+            'name': row['name'],
+            'type': row['type'],
+            'lat': row['lat'],
+            'lon': row['lon'],
+            'municipio': row['municipio']
         })
-    except Exception as e:
-        return jsonify({
-            "status": "unhealthy",
-            "service": "ruta-migrante", 
-            "database": "disconnected",
-            "error": str(e)
-        }), 500
-
-@app.route('/calcular-ruta', methods=['POST'])
-def calcular_ruta_endpoint():
-    """Endpoint principal para calcular rutas"""
-    start_time = time.time()
     
+    # Procesar datos de riesgo
+    df_fecha['fecha'] = pd.to_datetime(df_fecha['fecha'])
+    ultimo_mes = df_fecha['fecha'].max().month
+    ultimo_ano = df_fecha['fecha'].max().year
+    
+    df_ultimo = df_fecha[(df_fecha['fecha'].dt.month == ultimo_mes) & 
+                         (df_fecha['fecha'].dt.year == ultimo_ano)]
+    
+    riesgo_por_municipio_nombre = {}
+    for _, row in df_ultimo.iterrows():
+        id_municipio = row['id_municipio']
+        municipio_match = df_municipio[df_municipio['id_municipio'] == id_municipio]
+        if not municipio_match.empty:
+            municipio_nombre = municipio_match['nom_municipio'].iloc[0]
+            riesgo_por_municipio_nombre[municipio_nombre] = row['grado']
+    
+    return waypoints, riesgo_por_municipio_nombre
+
+# Cargar datos al iniciar
+waypoints, riesgo_por_municipio_nombre = cargar_datos_iniciales()
+colores_riesgo = {'Alto': 'red', 'Medio': 'orange', 'Bajo': 'green', 'Desconocido': 'gray'}
+
+print(f"✅ Servidor listo: {len(waypoints)} ONGs, {len(riesgo_por_municipio_nombre)} municipios con riesgo")
+
+# --- ENDPOINT PRINCIPAL ---
+@app.route('/generar_ruta', methods=['POST'])
+def generar_ruta():
+    """Endpoint que recibe ubicación y devuelve HTML con mapa"""
     try:
-        # Obtener datos de la solicitud
         data = request.get_json()
+        lat = float(data['lat'])
+        lon = float(data['lon'])
         
-        if not data:
-            return jsonify({"error": "Se requiere JSON con lat y lon"}), 400
-        
-        lat = data.get('lat')
-        lon = data.get('lon')
-        
-        if not lat or not lon:
-            return jsonify({"error": "Se requieren latitud (lat) y longitud (lon)"}), 400
-        
-        logger.info(f"📍 Solicitud de ruta recibida: ({lat}, {lon})")
-        
-        # Validar coordenadas
-        try:
-            lat = float(lat)
-            lon = float(lon)
-            if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
-                return jsonify({"error": "Coordenadas fuera de rango válido"}), 400
-        except ValueError:
-            return jsonify({"error": "Coordenadas deben ser números válidos"}), 400
-        
-        # Cargar datos
-        waypoints, riesgo_por_municipio = cargar_datos_ongs()
-        if not waypoints:
-            return jsonify({"error": "No se pudieron cargar los datos de ONGs"}), 500
-        
-        # Configurar ubicación del usuario
-        start_point = (lat, lon)
-        
-        # Encontrar ONG más cercana
-        ong_cercana = ong_mas_cercana(start_point, waypoints)
-        if not ong_cercana:
-            return jsonify({"error": "No se encontró ninguna ONG cercana"}), 404
-        
-        # Obtener recomendación
-        recomendacion = obtener_recomendacion_norte(start_point, waypoints, ong_cercana)
-        
-        # Calcular ruta con timeout
-        dest_point = (ong_cercana['lat'], ong_cercana['lon'])
-        route_coords = None
-        
-        try:
-            route_coords, G = calcular_ruta_optimizada(start_point, dest_point, timeout=120)
-        except Exception as e:
-            logger.warning(f"⚠️ No se pudo calcular ruta detallada: {e}")
-            # Continuar sin ruta detallada
+        print(f"📍 Nueva solicitud: {lat}, {lon}")
         
         # Generar mapa
-        mapa = generar_mapa_completo(
-            start_point, ong_cercana, waypoints, 
-            riesgo_por_municipio, route_coords, recomendacion
-        )
-        
-        # Generar HTML
-        html_content = mapa.get_root().render()
-        
-        # Agregar meta tags para móviles
-        html_content = html_content.replace('<head>', '''
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-            <title>ONG Finder - Ruta Recomendada</title>
-            <style>
-                body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
-                #map { position: absolute; top: 0; bottom: 0; width: 100%; }
-            </style>
-        ''')
-
-        processing_time = time.time() - start_time
-        logger.info(f"✅ Ruta calculada en {processing_time:.2f} segundos")
-        
-        return html_content
-        
-    except Exception as e:
-        logger.error(f"❌ Error en endpoint: {e}")
-        return jsonify({
-            "error": "Error interno del servidor",
-            "message": str(e)
-        }), 500
-
-@app.route('/calcular-ruta-json', methods=['POST'])
-def calcular_ruta_json():
-    """Endpoint alternativo que devuelve JSON en lugar de HTML"""
-    start_time = time.time()
-    
-    try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({"error": "Se requiere JSON con lat y lon"}), 400
-        
-        lat = data.get('lat')
-        lon = data.get('lon')
-        
-        if not lat or not lon:
-            return jsonify({"error": "Se requieren latitud (lat) y longitud (lon)"}), 400
-        
-        # Cargar datos
-        waypoints, riesgo_por_municipio = cargar_datos_ongs()
-        if not waypoints:
-            return jsonify({"error": "No se pudieron cargar los datos de ONGs"}), 500
-        
-        # Encontrar ONG más cercana
-        start_point = (float(lat), float(lon))
-        ong_cercana = ong_mas_cercana(start_point, waypoints)
-        
-        if not ong_cercana:
-            return jsonify({"error": "No se encontró ninguna ONG cercana"}), 404
-        
-        # Obtener recomendación
-        recomendacion = obtener_recomendacion_norte(start_point, waypoints, ong_cercana)
-        
-        processing_time = time.time() - start_time
-        logger.info(f"✅ Respuesta JSON generada en {processing_time:.2f} segundos")
+        html_content = generar_mapa_completo(lat, lon)
         
         return jsonify({
-            "success": True,
-            "processing_time": processing_time,
-            "usuario": {"lat": lat, "lon": lon},
-            "ong_destino": {
-                "nombre": ong_cercana['name'],
-                "tipo": ong_cercana['type'],
-                "municipio": ong_cercana.get('municipio', 'Desconocido'),
-                "lat": ong_cercana['lat'],
-                "lon": ong_cercana['lon'],
-                "distancia_km": round(ong_cercana['distancia'], 2)
-            },
-            "recomendacion": recomendacion,
-            "total_ongs": len(waypoints)
+            'status': 'success',
+            'html': html_content,
+            'message': f'Mapa generado para {lat}, {lon}'
         })
         
     except Exception as e:
-        logger.error(f"❌ Error en endpoint JSON: {e}")
-        return jsonify({"error": f"Error interno: {str(e)}"}), 500
+        return jsonify({
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }), 400
 
-# Manejo de errores
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Endpoint no encontrado"}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({"error": "Error interno del servidor"}), 500
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    debug = os.environ.get('DEBUG', 'False').lower() == 'true'
+# --- LÓGICA PARA GENERAR MAPA ---
+def generar_mapa_completo(lat_usuario, lon_usuario):
+    """Genera el mapa completo con ruta coloreada"""
     
-    logger.info(f"🚀 Iniciando servidor optimizado en puerto {port}")
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    start = (lat_usuario, lon_usuario)
+    
+    # 1. Encontrar ONG más cercana
+    def ong_mas_cercana(pos_actual, waypoints):
+        ongs = [w for w in waypoints if str(w.get('type', '')).strip().lower() != 'frontera']
+        if not ongs:
+            return None
+        for o in ongs:
+            o['distancia'] = geodesic(pos_actual, (o['lat'], o['lon'])).kilometers
+        return min(ongs, key=lambda x: x['distancia'])
+    
+    ong_cercana = ong_mas_cercana(start, waypoints)
+    if not ong_cercana:
+        return "<h1>No se encontró ONG cercana</h1>"
+    
+    print(f"🎯 ONG destino: {ong_cercana['name']}")
+    
+    # 2. Descargar red vial
+    dest_point = (ong_cercana['lat'], ong_cercana['lon'])
+    distance_km = geodesic(start, dest_point).km
+    buffer_m = (distance_km + 0.3) * 1000
+    
+    G = ox.graph_from_point(start, dist=buffer_m, network_type="drive")
+    
+    # 3. Calcular ruta
+    def haversine_heuristic(u, v, G):
+        lat1, lon1 = G.nodes[u]['y'], G.nodes[u]['x']
+        lat2, lon2 = G.nodes[v]['y'], G.nodes[v]['x']
+        R = 6371000
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = math.sin(dphi/2)*2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)*2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        return R * c
+    
+    orig_node = ox.distance.nearest_nodes(G, lon_usuario, lat_usuario)
+    dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
+    
+    route = nx.astar_path(
+        G, orig_node, dest_node,
+        heuristic=lambda u, v: haversine_heuristic(u, v, G),
+        weight='length'
+    )
+    
+    route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
+    
+    # 4. Segmentar ruta por riesgo
+    def obtener_riesgo_por_proximidad(lat, lon):
+        min_dist = float('inf')
+        riesgo = 'Desconocido'
+        for ong in waypoints:
+            if ong.get('municipio', 'Desconocido') == 'Desconocido':
+                continue
+            dist = geodesic((lat, lon), (ong['lat'], ong['lon'])).kilometers
+            if dist < min_dist:
+                min_dist = dist
+                municipio = ong['municipio']
+                riesgo = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
+        if min_dist > 50:
+            return 'Desconocido'
+        return riesgo
+    
+    segmentos_ruta = []
+    segmento_actual = []
+    riesgo_actual = None
+    
+    for i in range(0, len(route_coords), 10):
+        if i >= len(route_coords):
+            break
+        lat, lon = route_coords[i]
+        riesgo = obtener_riesgo_por_proximidad(lat, lon)
+        
+        if riesgo_actual is None:
+            riesgo_actual = riesgo
+            segmento_actual = [route_coords[i]]
+        elif riesgo == riesgo_actual:
+            segmento_actual.append(route_coords[i])
+        else:
+            if segmento_actual:
+                segmentos_ruta.append({
+                    'coords': segmento_actual,
+                    'riesgo': riesgo_actual,
+                    'color': colores_riesgo.get(riesgo_actual, 'gray')
+                })
+            riesgo_actual = riesgo
+            segmento_actual = [route_coords[i]]
+    
+    if segmento_actual:
+        segmentos_ruta.append({
+            'coords': segmento_actual,
+            'riesgo': riesgo_actual,
+            'color': colores_riesgo.get(riesgo_actual, 'gray')
+        })
+    
+    # 5. Crear mapa Folium
+    m = folium.Map(
+        location=start,
+        zoom_start=12,
+        tiles="CartoDB positron",
+        width='100%', 
+        height='100vh'
+    )
+    
+    # Dibujar segmentos de ruta coloreados
+    for segmento in segmentos_ruta:
+        folium.PolyLine(
+            segmento['coords'],
+            color=segmento['color'],
+            weight=8,
+            opacity=0.8,
+            tooltip=f"Riesgo: {segmento['riesgo']}"
+        ).add_to(m)
+    
+    # Marcador del usuario
+    folium.Marker(
+        location=start,
+        popup="📍 Tu ubicación",
+        tooltip="Tu ubicación",
+        icon=folium.Icon(color="blue", icon="user")
+    ).add_to(m)
+    
+    # Marcador de la ONG destino
+    folium.Marker(
+        location=(ong_cercana['lat'], ong_cercana['lon']),
+        popup=f"🏠 {ong_cercana['name']}",
+        tooltip=f"Destino: {ong_cercana['name']}",
+        icon=folium.Icon(color="green", icon="home")
+    ).add_to(m)
+    
+    # Leyenda
+    legend_html = '''
+    <div style="position: fixed; bottom: 20px; left: 10px; background: white; padding: 10px; border: 2px solid grey; z-index: 9999; font-size: 12px;">
+        <p><strong>🎯 Leyenda de Riesgo</strong></p>
+        <p><span style="color:red">🔴</span> Alto</p>
+        <p><span style="color:orange">🟠</span> Medio</p>
+        <p><span style="color:green">🟢</span> Bajo</p>
+        <p><span style="color:gray">⚫</span> Desconocido</p>
+    </div>
+    '''
+    m.get_root().html.add_child(folium.Element(legend_html))
+    
+    return m.get_root().render()
+
+# --- ENDPOINT DE ESTADO ---
+@app.route('/status', methods=['GET'])
+def status():
+    return jsonify({
+        'status': 'running',
+        'ongs_cargadas': len(waypoints),
+        'municipios_riesgo': len(riesgo_por_municipio_nombre)
+    })
+
+if _name_ == '_main_':
+    app.run(host='0.0.0.0', port=5000, debug=True)
