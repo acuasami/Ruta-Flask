@@ -9,8 +9,8 @@ from geopy.distance import geodesic
 import folium
 from urllib.parse import urlparse
 
-app = Flask(_name_)
-CORS(app)  # Permitir requests desde Android
+app = Flask(__name__)  # <--- CORREGIR AQUÍ (doble guion bajo)
+CORS(app)
 
 # --- CONFIGURACIÓN DE BASE DE DATOS ---
 uri = 'postgresql://postgres:KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ@switchyard.proxy.rlwy.net:13155/railway'
@@ -273,5 +273,7 @@ def status():
         'municipios_riesgo': len(riesgo_por_municipio_nombre)
     })
 
-if _name_ == '_main_':
+# Al final del archivo:
+if __name__ == '__main__':  # <--- CORREGIR AQUÍ (doble guion bajo en ambos lados)
     app.run(host='0.0.0.0', port=5000, debug=True)
+
