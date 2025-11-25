@@ -1,52 +1,53 @@
-from flask import Flask, request, jsonify, render_template_string
-from flask_cors import CORS
+from flask import Flask, request, render_template_string
+import os
 import math
 import pandas as pd
 import osmnx as ox
 import networkx as nx
+import re
 import psycopg2
 from geopy.distance import geodesic
 import folium
-from urllib.parse import urlparse
+from shapely.geometry import Point, LineString
+import geopandas as gpd
+import numpy as np
+from networkx.exception import NetworkXNoPath
 
-app = Flask(__name__)  # <--- CORREGIR AQUÍ (doble guion bajo)
-CORS(app)
+app = Flask(__name__)
 
 # --- CONFIGURACIÓN DE BASE DE DATOS ---
-uri = 'postgresql://postgres:KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ@switchyard.proxy.rlwy.net:13155/railway'
-result = urlparse(uri)
+# (Asegúrate de que estas variables de entorno existan en Railway)
 DB_CONFIG = {
-    'user': result.username,
-    'password': result.password,
-    'host': result.hostname,
-    'port': result.port,
-    'dbname': result.path.lstrip('/')
+    'host': os.environ.get('PGHOST', 'tramway.proxy.rlwy.net'),
+    'port': int(os.environ.get('PGPORT', 31631)),
+    'dbname': os.environ.get('PGDATABASE', 'railway'),
+    'user': os.environ.get('PGUSER', 'postgres'),
+    'password': os.environ.get('PGPASSWORD', 'KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ')
 }
 
-# --- CARGAR DATOS AL INICIAR EL SERVIDOR ---
-print("🔄 Cargando datos iniciales...")
+# --- TODA LA LÓGICA DE TU NOTEBOOK VA AQUÍ ---
+# He movido la lógica principal a funciones para que sea más limpio.
 
-def cargar_datos_iniciales():
-    """Carga ONGs y datos de riesgo una vez al iniciar el servidor"""
-    # Cargar ONGs
+def conectar_y_leer_sql(query):
+    """Conecta a la BD, ejecuta una consulta y devuelve un DataFrame."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        df = pd.read_sql(query, conn)
+        conn.close()
+        return df
+    except Exception as e:
+        print(f"❌ Error al leer la base de datos: {e}")
+        return pd.DataFrame()
+
+def cargar_waypoints_ongs():
+    """Carga todas las ONGs y municipios desde la BD."""
     QUERY_ONG = """
     SELECT o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
     FROM public.ongs o
     JOIN public.municipio m ON o.id_municipio = m.id_municipio;
     """
+    df_ongs = conectar_y_leer_sql(QUERY_ONG)
     
-    conn = psycopg2.connect(**DB_CONFIG)
-    df_ongs = pd.read_sql(QUERY_ONG, conn)
-    
-    # Cargar datos de riesgo
-    QUERY_FECHA = "SELECT * FROM public.fecha;"
-    QUERY_MUNICIPIO = "SELECT * FROM public.municipio;"
-    
-    df_fecha = pd.read_sql(QUERY_FECHA, conn)
-    df_municipio = pd.read_sql(QUERY_MUNICIPIO, conn)
-    conn.close()
-    
-    # Procesar ONGs
     df_ongs.rename(columns={
         'nom_ong': 'name', 'tipo': 'type', 'latitud': 'lat', 
         'longitud': 'lon', 'nom_municipio': 'municipio'
@@ -56,224 +57,738 @@ def cargar_datos_iniciales():
     df_ongs['lon'] = pd.to_numeric(df_ongs['lon'], errors='coerce')
     df_ongs = df_ongs.dropna(subset=['lat', 'lon'])
     
-    waypoints = []
-    for _, row in df_ongs.iterrows():
-        waypoints.append({
-            'name': row['name'],
-            'type': row['type'],
-            'lat': row['lat'],
-            'lon': row['lon'],
-            'municipio': row['municipio']
-        })
-    
-    # Procesar datos de riesgo
+    return [row.to_dict() for _, row in df_ongs.iterrows()]
+
+def cargar_datos_riesgo():
+    """Carga los datos de riesgo del último mes."""
+    df_fecha = conectar_y_leer_sql("SELECT * FROM public.fecha;")
+    df_municipio = conectar_y_leer_sql("SELECT * FROM public.municipio;")
+
+    if df_fecha.empty or df_municipio.empty:
+        return {}
+
     df_fecha['fecha'] = pd.to_datetime(df_fecha['fecha'])
     ultimo_mes = df_fecha['fecha'].max().month
     ultimo_ano = df_fecha['fecha'].max().year
     
-    df_ultimo = df_fecha[(df_fecha['fecha'].dt.month == ultimo_mes) & 
+    df_ultimo = df_fecha[(df_fecha['fecha'].dt.month == ultimo_mes) &
                          (df_fecha['fecha'].dt.year == ultimo_ano)]
     
-    riesgo_por_municipio_nombre = {}
-    for _, row in df_ultimo.iterrows():
-        id_municipio = row['id_municipio']
-        municipio_match = df_municipio[df_municipio['id_municipio'] == id_municipio]
-        if not municipio_match.empty:
-            municipio_nombre = municipio_match['nom_municipio'].iloc[0]
-            riesgo_por_municipio_nombre[municipio_nombre] = row['grado']
+    # Unir con nombres de municipio
+    df_riesgo_completo = pd.merge(df_ultimo, df_municipio, on='id_municipio')
     
-    return waypoints, riesgo_por_municipio_nombre
+    return dict(zip(df_riesgo_completo['nom_municipio'], df_riesgo_completo['grado']))
 
-# Cargar datos al iniciar
-waypoints, riesgo_por_municipio_nombre = cargar_datos_iniciales()
-colores_riesgo = {'Alto': 'red', 'Medio': 'orange', 'Bajo': 'green', 'Desconocido': 'gray'}
+def ong_mas_cercana(pos_actual, waypoints):
+    """Encuentra la ONG (no frontera) más cercana."""
+    ongs = [w for w in waypoints if str(w.get('type', '')).strip().lower() != 'frontera']
+    if not ongs:
+        return None
+    for o in ongs:
+        o['distancia'] = geodesic(pos_actual, (o['lat'], o['lon'])).kilometers
+    return min(ongs, key=lambda x: x['distancia'])
 
-print(f"✅ Servidor listo: {len(waypoints)} ONGs, {len(riesgo_por_municipio_nombre)} municipios con riesgo")
+def find_sorted_ongs(start, waypoints_list):
+    """Encuentra ONGs ordenadas por distancia."""
+    candidates = []
+    for ong in waypoints_list:
+        if str(ong.get('type', '')).strip().lower() != 'frontera':
+            ong_point = (ong["lat"], ong["lon"])
+            dist = geodesic(start, ong_point).km
+            ong['distancia'] = dist
+            candidates.append(ong)
+    candidates.sort(key=lambda x: x['distancia'])
+    return candidates
 
-# --- ENDPOINT PRINCIPAL ---
-@app.route('/generar_ruta', methods=['POST'])
-def generar_ruta():
-    """Endpoint que recibe ubicación y devuelve HTML con mapa"""
-    try:
-        data = request.get_json()
-        lat = float(data['lat'])
-        lon = float(data['lon'])
-        
-        print(f"📍 Nueva solicitud: {lat}, {lon}")
-        
-        # Generar mapa
-        html_content = generar_mapa_completo(lat, lon)
-        
-        return jsonify({
-            'status': 'success',
-            'html': html_content,
-            'message': f'Mapa generado para {lat}, {lon}'
-        })
-        
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'Error: {str(e)}'
-        }), 400
+def haversine_heuristic(u, v, G):
+    """Heurística para A*."""
+    lat1, lon1 = G.nodes[u]['y'], G.nodes[u]['x']
+    lat2, lon2 = G.nodes[v]['y'], G.nodes[v]['x']
+    R = 6371000  # Radio de la Tierra en metros
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
 
-# --- LÓGICA PARA GENERAR MAPA ---
-def generar_mapa_completo(lat_usuario, lon_usuario):
-    """Genera el mapa completo con ruta coloreada"""
-    
-    start = (lat_usuario, lon_usuario)
-    
-    # 1. Encontrar ONG más cercana
-    def ong_mas_cercana(pos_actual, waypoints):
-        ongs = [w for w in waypoints if str(w.get('type', '')).strip().lower() != 'frontera']
-        if not ongs:
-            return None
-        for o in ongs:
-            o['distancia'] = geodesic(pos_actual, (o['lat'], o['lon'])).kilometers
-        return min(ongs, key=lambda x: x['distancia'])
-    
-    ong_cercana = ong_mas_cercana(start, waypoints)
-    if not ong_cercana:
-        return "<h1>No se encontró ONG cercana</h1>"
-    
-    print(f"🎯 ONG destino: {ong_cercana['name']}")
-    
-    # 2. Descargar red vial
-    dest_point = (ong_cercana['lat'], ong_cercana['lon'])
-    distance_km = geodesic(start, dest_point).km
-    buffer_m = (distance_km + 0.3) * 1000
-    
-    G = ox.graph_from_point(start, dist=buffer_m, network_type="drive")
-    
-    # 3. Calcular ruta
-    def haversine_heuristic(u, v, G):
-        lat1, lon1 = G.nodes[u]['y'], G.nodes[u]['x']
-        lat2, lon2 = G.nodes[v]['y'], G.nodes[v]['x']
-        R = 6371000
-        phi1, phi2 = math.radians(lat1), math.radians(lat2)
-        dphi = math.radians(lat2 - lat1)
-        dlambda = math.radians(lon2 - lon1)
-        a = math.sin(dphi/2)*2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)*2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-        return R * c
-    
-    orig_node = ox.distance.nearest_nodes(G, lon_usuario, lat_usuario)
-    dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
-    
-    route = nx.astar_path(
-        G, orig_node, dest_node,
-        heuristic=lambda u, v: haversine_heuristic(u, v, G),
-        weight='length'
-    )
-    
-    route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
-    
-    # 4. Segmentar ruta por riesgo
-    def obtener_riesgo_por_proximidad(lat, lon):
-        min_dist = float('inf')
-        riesgo = 'Desconocido'
-        for ong in waypoints:
-            if ong.get('municipio', 'Desconocido') == 'Desconocido':
-                continue
-            dist = geodesic((lat, lon), (ong['lat'], ong['lon'])).kilometers
-            if dist < min_dist:
-                min_dist = dist
-                municipio = ong['municipio']
-                riesgo = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
-        if min_dist > 50:
-            return 'Desconocido'
-        return riesgo
-    
-    segmentos_ruta = []
-    segmento_actual = []
-    riesgo_actual = None
-    
-    for i in range(0, len(route_coords), 10):
-        if i >= len(route_coords):
-            break
-        lat, lon = route_coords[i]
-        riesgo = obtener_riesgo_por_proximidad(lat, lon)
-        
-        if riesgo_actual is None:
-            riesgo_actual = riesgo
-            segmento_actual = [route_coords[i]]
-        elif riesgo == riesgo_actual:
-            segmento_actual.append(route_coords[i])
-        else:
-            if segmento_actual:
-                segmentos_ruta.append({
-                    'coords': segmento_actual,
-                    'riesgo': riesgo_actual,
-                    'color': colores_riesgo.get(riesgo_actual, 'gray')
-                })
-            riesgo_actual = riesgo
-            segmento_actual = [route_coords[i]]
-    
-    if segmento_actual:
-        segmentos_ruta.append({
-            'coords': segmento_actual,
-            'riesgo': riesgo_actual,
-            'color': colores_riesgo.get(riesgo_actual, 'gray')
-        })
-    
-    # 5. Crear mapa Folium
+def obtener_municipio_por_proximidad(lat, lon, waypoints):
+    """Aproximación del municipio basado en la ONG más cercana."""
+    min_dist = float('inf')
+    municipio_cercano = 'Desconocido'
+    for ong in waypoints:
+        dist = geodesic((lat, lon), (ong['lat'], ong['lon'])).kilometers
+        if dist < min_dist:
+            min_dist = dist
+            municipio_cercano = ong.get('municipio', 'Desconocido')
+    return municipio_cercano
+
+def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segmentos_ruta, waypoints, id_usuario, colores_riesgo, ongs_cercanas, siguiente_recomendacion):
+    """Genera HTML optimizado para móviles con panel de pestañas incluyendo recomendaciones"""
     m = folium.Map(
-        location=start,
-        zoom_start=12,
+        location=ubicacion_usuario,
+        zoom_start=13,
         tiles="CartoDB positron",
+        # Asegúrate de que el mapa se ajuste al WebView
         width='100%', 
-        height='100vh'
+        height='100vh' 
     )
     
-    # Dibujar segmentos de ruta coloreados
-    for segmento in segmentos_ruta:
+    # Configuración para móviles
+    m.options['touchZoom'] = True
+    m.options['dragging'] = True
+    m.options['scrollWheelZoom'] = False
+    
+    # --- DIBUJAR SEGMENTOS DE RUTA CON COLORES DE RIESGO ---
+    print("🎨 Dibujando ruta con colores de riesgo...")
+    for i, segmento in enumerate(segmentos_ruta):
+        color = colores_riesgo.get(segmento['grado_riesgo'], 'gray')
+        
         folium.PolyLine(
             segmento['coords'],
-            color=segmento['color'],
+            color=color,
             weight=8,
-            opacity=0.8,
-            tooltip=f"Riesgo: {segmento['riesgo']}"
+            opacity=0.9,
+            tooltip=f"🏙️ {segmento['municipio']} | 🎯 Riesgo: {segmento['grado_riesgo']}"
+        ).add_to(m)
+        print(f"   📍 Segmento {i+1}: {segmento['municipio']} - {segmento['grado_riesgo']} ({color})")
+    
+    # --- MARCADOR DEL USUARIO ---
+    folium.Marker(
+        location=ubicacion_usuario,
+        popup=folium.Popup(
+            f"""
+            <div style='font-size:14px; max-width:250px;'>
+                <div style='background:#4A00E0; color:white; padding:8px; border-radius:5px 5px 0 0; margin:-10px -10px 10px -10px;'>
+                    <b>📍 Tu Ubicación Actual</b>
+                </div>
+                <p><b>👤 Usuario:</b> ID {id_usuario}</p>
+                <p><b>🎯 Destino:</b> {ong_cercana.get('name', 'No disponible')}</p>
+            </div>
+            """,
+            max_width=300
+        ),
+        tooltip="Tu ubicación",
+        icon=folium.Icon(color="blue", icon="user", prefix="fa")
+    ).add_to(m)
+    
+    # --- MARCADOR DE LA ONG DESTINO CON FICHA COMPLETA ---
+    if ong_cercana and ong_cercana.get('name') != 'ONG no disponible':
+        municipio_ong = ong_cercana.get('municipio', 'Desconocido')
+        
+        # Determinar icono según tipo
+        tipo_icono = {
+            'Albergue': 'bed',
+            'Comedor': 'utensils',
+            'Frontera': 'flag',
+            'default': 'home'
+        }
+        icono = tipo_icono.get(ong_cercana.get('type', ''), tipo_icono['default'])
+        
+        folium.Marker(
+            location=(ong_cercana['lat'], ong_cercana['lon']),
+            popup=folium.Popup(
+                f"""
+                <div style='font-size:14px; max-width:280px;'>
+                    <div style='background:#27ae60; color:white; padding:8px; border-radius:5px 5px 0 0; margin:-10px -10px 10px -10px;'>
+                        <b>🏠 ONG Destino</b>
+                    </div>
+                    <p><b>📌 Nombre:</b> {ong_cercana['name']}</p>
+                    <p><b>🎯 Tipo:</b> {ong_cercana['type']}</p>
+                    <p><b>🏙️ Municipio:</b> {municipio_ong}</p>
+                    <p><b>📏 Distancia:</b> {ong_cercana['distancia']:.1f} km</p>
+                    <div style='background:#f8f9fa; padding:5px; border-radius:3px; margin:5px 0;'>
+                        <small>📍 {ong_cercana['lat']:.4f}, {ong_cercana['lon']:.4f}</small>
+                    </div>
+                </div>
+                """,
+                max_width=320
+            ),
+            tooltip=f"Destino: {ong_cercana['name']}",
+            icon=folium.Icon(color="green", icon="bed", prefix="fa")
         ).add_to(m)
     
-    # Marcador del usuario
-    folium.Marker(
-        location=start,
-        popup="📍 Tu ubicación",
-        tooltip="Tu ubicación",
-        icon=folium.Icon(color="blue", icon="user")
-    ).add_to(m)
+    # --- MARCADOR DE LA SIGUIENTE RECOMENDACIÓN ---
+    if siguiente_recomendacion:
+        folium.Marker(
+            location=(siguiente_recomendacion['lat'], siguiente_recomendacion['lon']),
+            popup=folium.Popup(
+                f"""
+                <div style='font-size:14px; max-width:280px;'>
+                    <div style='background:#FF9800; color:white; padding:8px; border-radius:5px 5px 0 0; margin:-10px -10px 10px -10px;'>
+                        <b>⭐ Próxima Recomendación</b>
+                    </div>
+                    <p><b>📌 Nombre:</b> {siguiente_recomendacion['name']}</p>
+                    <p><b>🎯 Tipo:</b> {siguiente_recomendacion['type']}</p>
+                    <p><b>🏙️ Municipio:</b> {siguiente_recomendacion.get('municipio', 'Desconocido')}</p>
+                    <p><b>📏 Distancia:</b> {siguiente_recomendacion['distancia']:.1f} km</p>
+                    <div style='background:#fff3e0; padding:5px; border-radius:3px; margin:5px 0;'>
+                        <small>💡 Recomendación del sistema</small>
+                    </div>
+                </div>
+                """,
+                max_width=320
+            ),
+            tooltip=f"⭐ Recomendación: {siguiente_recomendacion['name']}",
+            icon=folium.Icon(color="orange", icon="star", prefix="fa")
+        ).add_to(m)
     
-    # Marcador de la ONG destino
-    folium.Marker(
-        location=(ong_cercana['lat'], ong_cercana['lon']),
-        popup=f"🏠 {ong_cercana['name']}",
-        tooltip=f"Destino: {ong_cercana['name']}",
-        icon=folium.Icon(color="green", icon="home")
-    ).add_to(m)
+    # --- OTRAS ONGs CON FICHAS INFORMATIVAS COMPLETAS ---
+    ongs_marcadas = 0
+    for ong in waypoints:
+        if ong_cercana and ong['name'] != ong_cercana.get('name', '') and (not siguiente_recomendacion or ong['name'] != siguiente_recomendacion.get('name', '')):
+            municipio_ong = ong.get('municipio', 'Desconocido')
+            
+            # Determinar color según tipo
+            color_ong = {
+                'Albergue': 'lightblue',
+                'Comedor': 'orange',
+                'Frontera': 'red',
+                'default': 'gray'
+            }
+            color = color_ong.get(ong.get('type', ''), color_ong['default'])
+            
+            folium.CircleMarker(
+                location=(ong['lat'], ong['lon']),
+                radius=8,
+                popup=folium.Popup(
+                    f"""
+                    <div style='font-size:13px; max-width:260px;'>
+                        <div style='background:{color}; color:white; padding:6px; border-radius:5px 5px 0 0; margin:-10px -10px 8px -10px;'>
+                            <b>🏠 Punto de Ayuda</b>
+                        </div>
+                        <p><b>📌 Nombre:</b> {ong['name']}</p>
+                        <p><b>🎯 Tipo:</b> {ong['type']}</p>
+                        <p><b>🏙️ Municipio:</b> {municipio_ong}</p>
+                        <div style='background:#f8f9fa; padding:3px; border-radius:3px; margin:3px 0;'>
+                            <small>📍 {ong['lat']:.4f}, {ong['lon']:.4f}</small>
+                        </div>
+                    </div>
+                    """,
+                    max_width=300
+                ),
+                tooltip=f"{ong['type']}: {ong['name']}",
+                color=color,
+                fillColor=color,
+                weight=2,
+                fillOpacity=0.7
+            ).add_to(m)
+            ongs_marcadas += 1
     
-    # Leyenda
+    print(f"📍 Marcadas {ongs_marcadas} ONGs adicionales con fichas informativas")
+    
+    # --- LEYENDA MEJORADA CON RECOMENDACIONES ---
     legend_html = '''
-    <div style="position: fixed; bottom: 20px; left: 10px; background: white; padding: 10px; border: 2px solid grey; z-index: 9999; font-size: 12px;">
-        <p><strong>🎯 Leyenda de Riesgo</strong></p>
-        <p><span style="color:red">🔴</span> Alto</p>
-        <p><span style="color:orange">🟠</span> Medio</p>
-        <p><span style="color:green">🟢</span> Bajo</p>
-        <p><span style="color:gray">⚫</span> Desconocido</p>
+    <div style="
+        position: fixed; 
+        bottom: 20px; 
+        left: 10px; 
+        width: 220px; 
+        height: auto;
+        background-color: white; 
+        border: 2px solid #4A00E0; 
+        z-index: 9999; 
+        font-size: 11px;
+        padding: 10px;
+        border-radius: 5px;
+        box-shadow: 0 0 10px rgba(0,0,0,0.3);
+    ">
+        <h4 style="margin:0 0 8px 0; color:#4A00E0; font-size:12px;">🗺️ Leyenda del Mapa</h4>
+        
+        <div style="margin:5px 0;">
+            <p style="margin:2px 0; font-weight:bold;">🎯 Niveles de Riesgo:</p>
+            <p style="margin:2px 0;"><span style="color:red; font-weight:bold;">●</span> Alto</p>
+            <p style="margin:2px 0;"><span style="color:orange; font-weight:bold;">●</span> Medio</p>
+            <p style="margin:2px 0;"><span style="color:green; font-weight:bold;">●</span> Bajo</p>
+            <p style="margin:2px 0;"><span style="color:gray; font-weight:bold;">●</span> Desconocido</p>
+        </div>
+        
+        <div style="margin:5px 0;">
+            <p style="margin:2px 0; font-weight:bold;">📍 Marcadores:</p>
+            <p style="margin:2px 0;"><span style="color:orange;">⭐</span> Recomendación</p>
+            <p style="margin:2px 0;"><span style="color:lightblue;">●</span> Albergue</p>
+            <p style="margin:2px 0;"><span style="color:orange;">●</span> Comedor</p>
+            <p style="margin:2px 0;"><span style="color:red;">●</span> Frontera</p>
+        </div>
     </div>
     '''
     m.get_root().html.add_child(folium.Element(legend_html))
     
-    return m.get_root().render()
+    # --- PANEL CON PESTAÑAS INCLUYENDO RECOMENDACIÓN ---
+    destino_nombre = ong_cercana.get('name', 'No disponible') if ong_cercana else 'No disponible'
+    destino_distancia = ong_cercana.get('distancia', 0) if ong_cercana else 0
+    destino_tipo = ong_cercana.get('type', 'No disponible') if ong_cercana else 'No disponible'
+    destino_municipio = ong_cercana.get('municipio', 'Desconocido') if ong_cercana else 'Desconocido'
+    
+    # Calcular estadísticas de riesgo de la ruta
+    riesgo_alto = sum(1 for s in segmentos_ruta if s['grado_riesgo'] == 'Alto')
+    riesgo_medio = sum(1 for s in segmentos_ruta if s['grado_riesgo'] == 'Medio')
+    riesgo_bajo = sum(1 for s in segmentos_ruta if s['grado_riesgo'] == 'Bajo')
+    
+    # Preparar datos de recomendación
+    if siguiente_recomendacion:
+        rec_nombre = siguiente_recomendacion['name']
+        rec_distancia = siguiente_recomendacion['distancia']
+        rec_tipo = siguiente_recomendacion['type']
+        rec_municipio = siguiente_recomendacion.get('municipio', 'Desconocido')
+    else:
+        rec_nombre = "No disponible"
+        rec_distancia = 0
+        rec_tipo = "No disponible"
+        rec_municipio = "Desconocido"
+    
+    # Crear HTML para otras ONGs cercanas
+    otras_ongs_html = ""
+    if len(ongs_cercanas) > 2:
+        for ong in ongs_cercanas[2:7]:
+            otras_ongs_html += f"""
+            <div style="font-size:10px; margin:4px 0; padding:5px; background:#f8f9fa; border-radius:4px; border-left: 3px solid #4A00E0;">
+                <div style="font-weight:bold;">{ong['name']}</div>
+                <div style="color:#666; font-size:9px;">{ong['type']} - {ong.get('municipio', 'Desconocido')} - {ong['distancia']:.1f} km</div>
+            </div>
+            """
+    else:
+        otras_ongs_html = '<div style="font-size:10px; color:#666; text-align:center;">No hay más ONGs cercanas</div>'
+    
+    # Crear HTML para municipios en ruta
+    municipios_html = ""
+    for segmento in segmentos_ruta:
+        color = colores_riesgo.get(segmento['grado_riesgo'], 'gray')
+        municipios_html += f'<div style="font-size:10px; margin:3px 0; padding:3px; border-left: 3px solid {color}; background: #f8f9fa;">{segmento["municipio"]} <span style="float:right; color:{color};">{segmento["grado_riesgo"]}</span></div>'
+    
+    info_html = f'''
+<div style="
+    position: fixed; 
+    top: 10px; 
+    right: 10px; 
+    z-index: 9999; 
+    font-family: Arial, sans-serif;
+">
+    <!-- Botón principal -->
+    <div id="info-toggle" style="
+        background: #4A00E0; 
+        color: white; 
+        padding: 8px 15px; 
+        border-radius: 20px; 
+        cursor: pointer; 
+        font-size: 12px; 
+        font-weight: bold;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        text-align: center;
+        margin-bottom: 5px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+    " onclick="toggleInfo()">
+        <span>📋</span>
+        <span>Información de Ruta</span>
+        <span id="toggle-arrow">▼</span>
+    </div>
 
-# --- ENDPOINT DE ESTADO ---
-@app.route('/status', methods=['GET'])
-def status():
-    return jsonify({
-        'status': 'running',
-        'ongs_cargadas': len(waypoints),
-        'municipios_riesgo': len(riesgo_por_municipio_nombre)
-    })
+    <!-- Panel principal -->
+    <div id="info-panel" style="
+        background: white; 
+        border: 2px solid #4A00E0; 
+        border-radius: 10px; 
+        width: 320px; 
+        max-height: 500px; 
+        overflow: hidden;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        display: none;
+    ">
+        <!-- Pestañas -->
+        <div style="display: flex; border-bottom: 1px solid #ddd; background: #f8f9fa;">
+            <div class="tab-button active" onclick="switchTab('destino')" style="flex:1; padding:8px; text-align:center; cursor:pointer; border-bottom: 2px solid #4A00E0; font-size:11px;">🎯 Destino</div>
+            <div class="tab-button" onclick="switchTab('riesgo')" style="flex:1; padding:8px; text-align:center; cursor:pointer; font-size:11px;">📊 Riesgo</div>
+            <div class="tab-button" onclick="switchTab('recomendacion')" style="flex:1; padding:8px; text-align:center; cursor:pointer; font-size:11px;">⭐ Recomendación</div>
+            <div class="tab-button" onclick="switchTab('ruta')" style="flex:1; padding:8px; text-align:center; cursor:pointer; font-size:11px;">🗺️ Ruta</div>
+        </div>
 
-# Al final del archivo:
-if __name__ == '__main__':  # <--- CORREGIR AQUÍ (doble guion bajo en ambos lados)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+        <!-- Contenido de pestañas -->
+        <div style="padding: 12px; max-height: 400px; overflow-y: auto;">
+            
+            <!-- Pestaña Destino -->
+            <div id="tab-destino" class="tab-content">
+                <div style="margin-bottom: 15px;">
+                    <h4 style="margin:0 0 8px 0; color:#4A00E0; font-size:13px;">🏠 ONG Destino Actual</h4>
+                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 10px; border-radius: 6px;">
+                        <p style="margin:0 0 5px 0; font-size:12px; font-weight:bold;">{destino_nombre}</p>
+                        <p style="margin:0; font-size:10px; opacity:0.9;">{destino_tipo} - {destino_municipio}</p>
+                    </div>
+                </div>
 
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px;">
+                    <div style="background: #e3f2fd; padding: 6px; border-radius: 4px; text-align: center;">
+                        <div style="font-size:10px; color:#1976d2;">📏 Distancia</div>
+                        <div style="font-size:12px; font-weight:bold; color:#1976d2;">{destino_distancia:.1f} km</div>
+                    </div>
+                    <div style="background: #e8f5e8; padding: 6px; border-radius: 4px; text-align: center;">
+                        <div style="font-size:10px; color:#388e3c;">👤 Usuario</div>
+                        <div style="font-size:12px; font-weight:bold; color:#388e3c;">ID {id_usuario}</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pestaña Riesgo -->
+            <div id="tab-riesgo" class="tab-content" style="display: none;">
+                <h4 style="margin:0 0 10px 0; color:#4A00E0; font-size:13px;">📊 Análisis de Riesgo</h4>
+                
+                <div style="margin-bottom: 15px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                        <span style="font-size:11px; font-weight:bold;">Resumen de Segmentos:</span>
+                        <span style="font-size:11px; font-weight:bold;">{len(segmentos_ruta)} total</span>
+                    </div>
+                    
+                    <!-- Barra de progreso de riesgo -->
+                    <div style="background: #f0f0f0; border-radius: 10px; height: 20px; margin-bottom: 10px; overflow: hidden;">
+                        <div style="background: green; width: {(riesgo_bajo/len(segmentos_ruta))*100 if segmentos_ruta else 0}%; height: 100%; float: left;" title="Bajo: {riesgo_bajo}"></div>
+                        <div style="background: orange; width: {(riesgo_medio/len(segmentos_ruta))*100 if segmentos_ruta else 0}%; height: 100%; float: left;" title="Medio: {riesgo_medio}"></div>
+                        <div style="background: red; width: {(riesgo_alto/len(segmentos_ruta))*100 if segmentos_ruta else 0}%; height: 100%; float: left;" title="Alto: {riesgo_alto}"></div>
+                    </div>
+                    
+                    <!-- Leyenda de colores -->
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; text-align: center;">
+                        <div>
+                            <div style="color: green; font-size:12px;">● {riesgo_bajo}</div>
+                            <div style="font-size:9px; color:#666;">Bajo</div>
+                        </div>
+                        <div>
+                            <div style="color: orange; font-size:12px;">● {riesgo_medio}</div>
+                            <div style="font-size:9px; color:#666;">Medio</div>
+                        </div>
+                        <div>
+                            <div style="color: red; font-size:12px;">● {riesgo_alto}</div>
+                            <div style="font-size:9px; color:#666;">Alto</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pestaña Recomendación -->
+            <div id="tab-recomendacion" class="tab-content" style="display: none;">
+                <h4 style="margin:0 0 10px 0; color:#4A00E0; font-size:13px;">⭐ Próxima Recomendación</h4>
+                
+                <div style="margin-bottom: 15px;">
+                    <div style="background: linear-gradient(135deg, #FF9800 0%, #F57C00 100%); color: white; padding: 10px; border-radius: 6px; margin-bottom: 10px;">
+                        <p style="margin:0 0 5px 0; font-size:12px; font-weight:bold;">{rec_nombre}</p>
+                        <p style="margin:0; font-size:10px; opacity:0.9;">{rec_tipo} - {rec_municipio}</p>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px;">
+                        <div style="background: #fff3e0; padding: 6px; border-radius: 4px; text-align: center;">
+                            <div style="font-size:10px; color:#EF6C00;">📏 Distancia</div>
+                            <div style="font-size:12px; font-weight:bold; color:#EF6C00;">{rec_distancia:.1f} km</div>
+                        </div>
+                        <div style="background: #e8f5e8; padding: 6px; border-radius: 4px; text-align: center;">
+                            <div style="font-size:10px; color:#388e3c;">🎯 Tipo</div>
+                            <div style="font-size:12px; font-weight:bold; color:#388e3c;">{rec_tipo}</div>
+                        </div>
+                    </div>
+
+                    <div style="background: #e3f2fd; padding: 8px; border-radius: 5px; margin-bottom: 10px;">
+                        <p style="margin:0; font-size:10px; color:#1976d2; font-weight:bold;">💡 Recomendación del Sistema</p>
+                        <p style="margin:5px 0 0 0; font-size:9px; color:#1976d2;">Esta ONG ha sido seleccionada como tu próxima parada recomendada basada en proximidad y disponibilidad.</p>
+                    </div>
+                </div>
+
+                <div style="border-top: 1px solid #eee; padding-top: 10px;">
+                    <h5 style="margin:0 0 8px 0; color:#4A00E0; font-size:12px;">📍 Otras ONGs Cercanas</h5>
+                    <div style="max-height: 150px; overflow-y: auto;">
+                        {otras_ongs_html}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pestaña Ruta -->
+            <div id="tab-ruta" class="tab-content" style="display: none;">
+                <h4 style="margin:0 0 10px 0; color:#4A00E0; font-size:13px;">🗺️ Detalles de Ruta</h4>
+                
+                <div style="margin-bottom: 10px;">
+                    <div style="font-size:11px; margin-bottom: 5px;"><b>ONGs disponibles:</b> {len(waypoints)}</div>
+                    <div style="font-size:11px; margin-bottom: 5px;"><b>Segmentos calculados:</b> {len(segmentos_ruta)}</div>
+                </div>
+
+                <div style="max-height: 200px; overflow-y: auto; border: 1px solid #eee; border-radius: 5px; padding: 8px;">
+                    <div style="font-size:11px; font-weight:bold; margin-bottom: 5px;">Municipios en ruta:</div>
+                    {municipios_html}
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<style>
+.tab-button {{
+    transition: all 0.3s ease;
+}}
+.tab-button:hover {{
+    background: #e3f2fd;
+}}
+.tab-button.active {{
+    background: #4A00E0;
+    color: white;
+}}
+.tab-content {{
+    animation: fadeIn 0.3s ease;
+}}
+@keyframes fadeIn {{
+    from {{ opacity: 0; }}
+    to {{ opacity: 1; }}
+}}
+</style>
+
+<script>
+function toggleInfo() {{
+    var panel = document.getElementById('info-panel');
+    var arrow = document.getElementById('toggle-arrow');
+    if (panel.style.display === 'none' || panel.style.display === '') {{
+        panel.style.display = 'block';
+        arrow.innerHTML = '▲';
+    }} else {{
+        panel.style.display = 'none';
+        arrow.innerHTML = '▼';
+    }}
+}}
+
+function switchTab(tabName) {{
+    // Ocultar todos los contenidos
+    var contents = document.getElementsByClassName('tab-content');
+    for (var i = 0; i < contents.length; i++) {{
+        contents[i].style.display = 'none';
+    }}
+    
+    // Remover clase active de todos los botones
+    var buttons = document.getElementsByClassName('tab-button');
+    for (var i = 0; i < buttons.length; i++) {{
+        buttons[i].classList.remove('active');
+    }}
+    
+    // Mostrar contenido seleccionado y activar botón
+    document.getElementById('tab-' + tabName).style.display = 'block';
+    event.target.classList.add('active');
+}}
+
+// Cerrar al hacer clic fuera
+document.addEventListener('click', function(event) {{
+    var panel = document.getElementById('info-panel');
+    var button = document.getElementById('info-toggle');
+    if (!panel.contains(event.target) && !button.contains(event.target)) {{
+        panel.style.display = 'none';
+        document.getElementById('toggle-arrow').innerHTML = '▼';
+    }}
+}});
+
+// Inicializar con primera pestaña activa
+document.addEventListener('DOMContentLoaded', function() {{
+    switchTab('destino');
+}});
+</script>
+'''
+    m.get_root().html.add_child(folium.Element(info_html))
+    
+    # Guardar con meta tags para móvil
+    archivo_html = f"ruta_movil_{id_usuario}.html"
+    html_content = m.get_root().render()
+    
+    # Meta tags optimizados para móvil
+    html_content = html_content.replace('<head>', '''
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <style>
+            body { 
+                margin: 0; 
+                padding: 0; 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            }
+            #map { 
+                position: absolute; 
+                top: 0; 
+                bottom: 0; 
+                width: 100%; 
+            }
+            .leaflet-popup-content { 
+                font-size: 14px; 
+                line-height: 1.4;
+            }
+            .leaflet-control-zoom {
+                margin-top: 180px !important;
+            }
+            .leaflet-popup-content-wrapper {
+                border-radius: 8px;
+                box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+            }
+        </style>
+    ''')
+
+    return html_content
+
+@app.route('/')
+def index():
+    # Página de bienvenida simple
+    return "Servidor de Mapas Activo. Usa la app móvil."
+
+@app.route('/health')
+def health():
+    return "OK"
+
+@app.route('/mapa')
+def serve_map():
+    """
+    Ruta principal que genera el mapa dinámicamente.
+    """
+    try:
+        # 1. Obtener parámetros de la URL enviados desde la app móvil
+        lat = request.args.get('lat', type=float)
+        lon = request.args.get('lon', type=float)
+        id_usuario = request.args.get('id_usuario', default=1, type=int)
+        
+        start_point = (lat, lon)
+        
+        print(f"🚀 Petición recibida para Usuario: {id_usuario}, Ubicación: {start_point}")
+
+        # 2. Cargar datos (igual que en el notebook)
+        waypoints = cargar_waypoints_ongs()
+        riesgo_por_municipio_nombre = cargar_datos_riesgo()
+        colores_riesgo = {'Alto': 'red', 'Medio': 'orange', 'Bajo': 'green', 'Desconocido': 'gray'}
+
+        # 3. Calcular ONG más cercana y recomendación
+        ong_cercana = ong_mas_cercana(start_point, waypoints)
+        ongs_ordenadas = find_sorted_ongs(start_point, waypoints)
+        
+        siguiente_recomendacion = None
+        if len(ongs_ordenadas) > 1:
+            siguiente_recomendacion = ongs_ordenadas[1]
+        elif len(ongs_ordenadas) == 1:
+            siguiente_recomendacion = ongs_ordenadas[0]
+            
+        ongs_cercanas = ongs_ordenadas[:5]
+
+        # 4. Calcular la ruta (¡Esta es la parte lenta!)
+        # 🚨 Advertencia de rendimiento: esto puede ser muy lento
+        
+        segmentos_ruta = []
+        if ong_cercana:
+            try:
+                dest_point = (ong_cercana['lat'], ong_cercana['lon'])
+                # 1. Definir el bounding box (rectángulo)
+                north = max(lat, dest_point[0])
+                south = min(lat, dest_point[0])
+                east = max(lon, dest_point[1])
+                west = min(lon, dest_point[1])
+                
+                # 2. Añadir un pequeño margen (padding) de aprox. 1.1km
+                padding = 0.01 
+                
+                print(f"🗺️ Descargando grafo OSMnx desde Bounding Box...")
+                
+                # 3. Descargar solo ese rectángulo (mucho más rápido)
+                bbox_con_padding = (
+                    west - padding,   # left (oeste)
+                    south - padding,  # bottom (sur)
+                    east + padding,   # right (este)
+                    north + padding   # top (norte)
+                )
+
+                # 4. Descargar solo ese rectángulo usando el parámetro 'bbox'
+                G = ox.graph_from_bbox(
+                    bbox=bbox_con_padding, 
+                    network_type="drive"
+                )
+                print("✅ Grafo descargado")
+                
+                orig_node = ox.distance.nearest_nodes(G, lon, lat)
+                dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
+                
+                print("🧠 Calculando ruta A*...")
+                route = nx.astar_path(
+                    G, orig_node, dest_node,
+                    heuristic=lambda u, v: haversine_heuristic(u, v, G),
+                    weight='length'
+                )
+                
+                route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
+                
+                # --- INICIO DE LA LÓGICA DE SEGMENTACIÓN COMPLETA ---
+                # (Lógica extraída de tu prueba_OSM.ipynb)
+                
+                segmento_actual = []
+                municipio_actual = None
+                riesgo_actual = 'Desconocido' # Inicializar
+        
+                print("📊 Segmentando ruta por municipios y nivel de riesgo...")
+                for i, coord in enumerate(route_coords):
+                    lat_coord, lon_coord = coord # Usamos variables locales para la coordenada
+                    
+                    # Esta es la función de aproximación que usaste
+                    municipio = obtener_municipio_por_proximidad(lat_coord, lon_coord, waypoints) 
+                    
+                    # Obtener riesgo para este municipio
+                    riesgo = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
+                    
+                    if municipio_actual is None:
+                        municipio_actual = municipio
+                        segmento_actual.append(coord)
+                        riesgo_actual = riesgo
+                    elif municipio == municipio_actual:
+                        segmento_actual.append(coord)
+                    else:
+                        # Cambio de municipio - guardar segmento anterior y empezar nuevo
+                        if segmento_actual:
+                            segmentos_ruta.append({
+                                'coords': segmento_actual.copy(),
+                                'municipio': municipio_actual,
+                                'grado_riesgo': riesgo_actual
+                            })
+                        
+                        municipio_actual = municipio
+                        segmento_actual = [coord] # Empezar nuevo segmento
+                        riesgo_actual = riesgo
+            
+                # Añadir el último segmento
+                if segmento_actual:
+                    segmentos_ruta.append({
+                        'coords': segmento_actual,
+                        'municipio': municipio_actual,
+                        'grado_riesgo': riesgo_actual
+                    })
+            
+                print(f"📊 Ruta segmentada en {len(segmentos_ruta)} tramos por nivel de riesgo")
+                
+                # --- FIN DE LA LÓGICA DE SEGMENTACIÓN ---
+
+            except NetworkXNoPath:
+                print(f"❌ NO SE ENCONTRÓ RUTA. Es posible que los puntos no estén conectados por calles.")
+                segmentos_ruta = [] 
+            except Exception as e:
+                print(f"❌ Error al calcular la ruta: {e}")
+                segmentos_ruta = []
+        
+        # 5. Generar y devolver el HTML del mapa
+        print("🎨 Generando mapa Folium...")
+        map_html = generar_mapa_movil_con_recomendaciones(
+            start_point, 
+            ong_cercana, 
+            segmentos_ruta, 
+            waypoints, 
+            id_usuario,
+            colores_riesgo,
+            ongs_cercanas,
+            siguiente_recomendacion
+        )
+        
+        print("✅ Mapa generado. Enviando HTML a la app.")
+        return map_html
+
+    except Exception as e:
+        print(f"💥 Error fatal en /mapa: {e}")
+        return f"<h1>Error al generar el mapa:</h1><p>{e}</p>", 500
+
+
+if __name__ == '__main__':
+    # Esta parte solo se usa para pruebas locales, Railway usa el 'Procfile'
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
