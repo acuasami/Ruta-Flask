@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 app = Flask(__name__)
 
+
 # --- CONFIGURACIÓN DE BASE DE DATOS ---
 # (Asegúrate de que estas variables de entorno existan en Railway)
 uri = 'postgresql://postgres:KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ@switchyard.proxy.rlwy.net:13155/railway'
@@ -158,24 +159,6 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
         ).add_to(m)
         print(f"   📍 Segmento {i+1}: {segmento['municipio']} - {segmento['grado_riesgo']} ({color})")
     
-    nombre_destino = ong_cercana.get('name', 'No disponible') if ong_cercana else 'No disponible'
-
-    if ong_cercana:
-        dest_nombre = ong_cercana.get('name', 'No disponible')
-        dest_lat = ong_cercana['lat']
-        dest_lon = ong_cercana['lon']
-        dest_tipo = ong_cercana.get('type', 'Desconocido')
-        dest_municipio = ong_cercana.get('municipio', 'Desconocido')
-        dest_distancia = ong_cercana.get('distancia', 0)
-    else:
-        # Valores por defecto si falla la base de datos
-        dest_nombre = "Sin conexión a ONGs"
-        dest_lat = 0
-        dest_lon = 0
-        dest_tipo = "N/A"
-        dest_municipio = "N/A"
-        dest_distancia = 0
-
     # --- MARCADOR DEL USUARIO ---
     folium.Marker(
         location=ubicacion_usuario,
@@ -186,7 +169,7 @@ def generar_mapa_movil_con_recomendaciones(ubicacion_usuario, ong_cercana, segme
                     <b>📍 Tu Ubicación Actual</b>
                 </div>
                 <p><b>👤 Usuario:</b> ID {id_usuario}</p>
-                <p><b>🎯 Destino:</b> {dest_nombre}</p>
+                <p><b>🎯 Destino:</b> {ong_cercana.get('name', 'No disponible')}</p>
             </div>
             """,
             max_width=300
@@ -674,10 +657,6 @@ def serve_map():
 
         # 2. Cargar datos (igual que en el notebook)
         waypoints = cargar_waypoints_ongs()
-        # 🔍 DEBUG: VERIFICAR DATOS
-        print(f"📊 Waypoints cargados: {len(waypoints)}")
-        if len(waypoints) == 0:
-            print("⚠️ ALERTA: No se cargaron ONGs. Verifica la conexión a la BD.")
         riesgo_por_municipio_nombre = cargar_datos_riesgo()
         colores_riesgo = {'Alto': 'red', 'Medio': 'orange', 'Bajo': 'green', 'Desconocido': 'gray'}
 
@@ -697,96 +676,96 @@ def serve_map():
         # 🚨 Advertencia de rendimiento: esto puede ser muy lento
         
         segmentos_ruta = []
-        segmentos_ruta = []
         if ong_cercana:
             try:
                 dest_point = (ong_cercana['lat'], ong_cercana['lon'])
-                distancia_km = ong_cercana['distancia']
+                # 1. Definir el bounding box (rectángulo)
+                north = max(lat, dest_point[0])
+                south = min(lat, dest_point[0])
+                east = max(lon, dest_point[1])
+                west = min(lon, dest_point[1])
                 
-                # UMBRAL DE SEGURIDAD: 20 KM
-                # Si es más de 20km, NO descargamos el grafo completo para evitar error 500
-                if distancia_km > 20:
-                    print(f"⚠️ Destino lejano ({distancia_km:.1f} km). Activando MODO LIGERO (Línea recta).")
+                # 2. Añadir un pequeño margen (padding) de aprox. 1.1km
+                padding = 0.01 
+                
+                print(f"🗺️ Descargando grafo OSMnx desde Bounding Box...")
+                
+                # 3. Descargar solo ese rectángulo (mucho más rápido)
+                G = ox.graph_from_bbox(
+                    north + padding, 
+                    south - padding, 
+                    east + padding, 
+                    west - padding, 
+                    network_type="drive"
+                )
+                print("✅ Grafo descargado")
+                
+                orig_node = ox.distance.nearest_nodes(G, lon, lat)
+                dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
+                
+                print("🧠 Calculando ruta A*...")
+                route = nx.astar_path(
+                    G, orig_node, dest_node,
+                    heuristic=lambda u, v: haversine_heuristic(u, v, G),
+                    weight='length'
+                )
+                
+                route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
+                
+                # --- INICIO DE LA LÓGICA DE SEGMENTACIÓN COMPLETA ---
+                # (Lógica extraída de tu prueba_OSM.ipynb)
+                
+                segmento_actual = []
+                municipio_actual = None
+                riesgo_actual = 'Desconocido' # Inicializar
+        
+                print("📊 Segmentando ruta por municipios y nivel de riesgo...")
+                for i, coord in enumerate(route_coords):
+                    lat_coord, lon_coord = coord # Usamos variables locales para la coordenada
                     
-                    # Descargar solo un pequeño recuadro alrededor del USUARIO para dar contexto
-                    padding = 0.02  # Aprox 2-3 km alrededor
-                    bbox_usuario = (
-                        lon - padding, # west
-                        lat - padding, # south
-                        lon + padding, # east
-                        lat + padding  # north
-                    )
+                    # Esta es la función de aproximación que usaste
+                    municipio = obtener_municipio_por_proximidad(lat_coord, lon_coord, waypoints) 
                     
-                    # No calculamos ruta A* (tardaría demasiado), solo línea recta visual
-                    # Pero descargamos el mapa local para que se vea bonito el entorno del usuario
-                    print("🗺️ Descargando mapa local del usuario...")
-                    try:
-                        # Intentamos descargar solo el entorno local para visualización
-                        # Si falla, no importa, el mapa base de Folium (CartoDB) siempre está
-                        pass 
-                    except:
-                        pass
-
-                    # Creamos una línea recta simple para visualizar la dirección
+                    # Obtener riesgo para este municipio
+                    riesgo = riesgo_por_municipio_nombre.get(municipio, 'Desconocido')
+                    
+                    if municipio_actual is None:
+                        municipio_actual = municipio
+                        segmento_actual.append(coord)
+                        riesgo_actual = riesgo
+                    elif municipio == municipio_actual:
+                        segmento_actual.append(coord)
+                    else:
+                        # Cambio de municipio - guardar segmento anterior y empezar nuevo
+                        if segmento_actual:
+                            segmentos_ruta.append({
+                                'coords': segmento_actual.copy(),
+                                'municipio': municipio_actual,
+                                'grado_riesgo': riesgo_actual
+                            })
+                        
+                        municipio_actual = municipio
+                        segmento_actual = [coord] # Empezar nuevo segmento
+                        riesgo_actual = riesgo
+            
+                # Añadir el último segmento
+                if segmento_actual:
                     segmentos_ruta.append({
-                        'coords': [start_point, dest_point], # Línea directa
-                        'municipio': "Ruta Directa (Distancia Larga)",
-                        'grado_riesgo': 'Desconocido'
+                        'coords': segmento_actual,
+                        'municipio': municipio_actual,
+                        'grado_riesgo': riesgo_actual
                     })
-                    
-                else:
-                    # MODO NORMAL (Ruta detallada calle por calle)
-                    print(f"🚗 Destino cercano ({distancia_km:.1f} km). Calculando ruta detallada...")
-                    
-                    # Bounding box que cubre inicio y fin
-                    north = max(lat, dest_point[0]) + 0.01
-                    south = min(lat, dest_point[0]) - 0.01
-                    east = max(lon, dest_point[1]) + 0.01
-                    west = min(lon, dest_point[1]) - 0.01
-                    
-                    bbox_con_padding = (west, south, east, north)
-
-                    print(f"🗺️ Descargando grafo de calles...")
-                    G = ox.graph_from_bbox(bbox=bbox_con_padding, network_type="drive")
-                    
-                    orig_node = ox.distance.nearest_nodes(G, lon, lat)
-                    dest_node = ox.distance.nearest_nodes(G, dest_point[1], dest_point[0])
-                    
-                    print("🧠 Calculando ruta A*...")
-                    route = nx.astar_path(
-                        G, orig_node, dest_node,
-                        heuristic=lambda u, v: haversine_heuristic(u, v, G),
-                        weight='length'
-                    )
-                    
-                    route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
-                    
-                    # Crear un solo segmento con la ruta detallada
-                    municipio_ruta = obtener_municipio_por_proximidad(lat, lon, waypoints)
-                    riesgo_ruta = riesgo_por_municipio_nombre.get(municipio_ruta, 'Desconocido')
-                    
-                    segmentos_ruta.append({
-                        'coords': route_coords,
-                        'municipio': municipio_ruta,
-                        'grado_riesgo': riesgo_ruta
-                    })
+            
+                print(f"📊 Ruta segmentada en {len(segmentos_ruta)} tramos por nivel de riesgo")
+                
+                # --- FIN DE LA LÓGICA DE SEGMENTACIÓN ---
 
             except NetworkXNoPath:
-                print(f"❌ NO SE ENCONTRÓ RUTA. Usando línea recta.")
-                segmentos_ruta.append({
-                    'coords': [start_point, dest_point],
-                    'municipio': "Ruta Directa (Sin camino detectado)",
-                    'grado_riesgo': 'Desconocido'
-                })
+                print(f"❌ NO SE ENCONTRÓ RUTA. Es posible que los puntos no estén conectados por calles.")
+                segmentos_ruta = [] 
             except Exception as e:
                 print(f"❌ Error al calcular la ruta: {e}")
-                # Fallback a línea recta en caso de cualquier error
-                if ong_cercana:
-                     segmentos_ruta.append({
-                        'coords': [start_point, dest_point],
-                        'municipio': "Ruta Directa (Error cálculo)",
-                        'grado_riesgo': 'Desconocido'
-                    })
+                segmentos_ruta = []
         
         # 5. Generar y devolver el HTML del mapa
         print("🎨 Generando mapa Folium...")
