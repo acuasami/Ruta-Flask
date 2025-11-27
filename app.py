@@ -162,7 +162,7 @@ def api_ruta():
     except Exception as e:
         return jsonify({"success": False, "msg": str(e)}), 500
 
-@app.route('/mapa-google')
+@app.route('/mapa')
 def mapa_google():
     """Sirve la plantilla HTML que contiene el JS de Google Maps"""
     return render_template_string(HTML_GOOGLE_MAPS)
