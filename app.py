@@ -90,6 +90,10 @@ def encontrar_ruta_optima(origen_lat, origen_lon, nodos):
     2. Encuentra el nodo 'Frontera' más accesible.
     3. Ejecuta A* entre ellos.
     """
+
+    if not nodos:
+        return {"error": "No se pudieron cargar los nodos de la base de datos."}
+
     G = construir_grafo_logico(nodos)
     
     # 1. Nodo inicio (ONG más cercana al usuario)
@@ -150,6 +154,9 @@ def api_ruta():
     try:
         lat = request.args.get('lat', type=float)
         lon = request.args.get('lon', type=float)
+
+        if lat is None or lon is None:
+            return jsonify({"success": False, "msg": "Faltan parámetros lat y lon"}), 400
         
         nodos = cargar_nodos()
         resultado = encontrar_ruta_optima(lat, lon, nodos)
