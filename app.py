@@ -256,6 +256,7 @@ def health_check():
     return jsonify({"status": "ok"}), 200
 
 # --- PLANTILLA HTML MEJORADA PARA WAYPOINTS ---
+# --- PLANTILLA HTML MEJORADA PARA WAYPOINTS ---
 HTML_GOOGLE_MAPS = """
 <!DOCTYPE html>
 <html>
@@ -270,7 +271,8 @@ HTML_GOOGLE_MAPS = """
             position: fixed; bottom: 20px; left: 20px; right: 20px;
             background: white; padding: 15px; border-radius: 12px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.2); z-index: 10;
-            max-width: 400px; max-height: 40vh; overflow-y: auto;
+            max-width: 400px; max-height: 50vh; /* Aumentamos un poco la altura máxima */
+            overflow-y: auto;
             margin-left: auto; margin-right: auto; display: none;
         }
         
@@ -286,6 +288,25 @@ HTML_GOOGLE_MAPS = """
         .info-section { margin-bottom: 10px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
         .info-title { font-weight: bold; color: #555; font-size: 0.9em; }
         .info-content { font-size: 1.1em; margin-top: 2px; }
+
+        /* Estilos nuevos para la lista de ruta */
+        .route-list-container {
+            margin-top: 10px;
+            background-color: #f9f9f9;
+            border-radius: 8px;
+            padding: 10px;
+            max-height: 200px; /* Scroll interno para la lista */
+            overflow-y: auto;
+        }
+        .route-item {
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e0e0e0;
+            font-size: 0.9em;
+        }
+        .route-item:last-child { border-bottom: none; margin-bottom: 0; }
+        .route-item-name { font-weight: bold; color: #333; }
+        .route-item-details { color: #666; font-size: 0.85em; }
         
         .legend {
             position: fixed; top: 10px; left: 10px;
@@ -319,6 +340,12 @@ HTML_GOOGLE_MAPS = """
                 <div class="info-title">Total de paradas:</div>
                 <div class="info-content" id="total-stops"></div>
             </div>
+            
+            <div class="info-section" style="border-bottom: none;">
+                <div class="info-title">Detalle del recorrido:</div>
+                <div id="route-list" class="route-list-container">
+                    </div>
+            </div>
         </div>
     </div>
     
@@ -344,7 +371,7 @@ HTML_GOOGLE_MAPS = """
         let map;
         let directionsService;
         let directionsRenderer;
-        let routePolylines = []; // Para guardar las líneas coloreadas y poder borrarlas si hiciera falta
+        let routePolylines = [];
         
         const markerColorMap = {
             'Albergue': 'blue', 'Comedor': 'orange', 'Frontera': 'red', 'default': 'gray'
@@ -383,11 +410,10 @@ HTML_GOOGLE_MAPS = """
             directionsService = new google.maps.DirectionsService();
             directionsRenderer = new google.maps.DirectionsRenderer({
                 map: map,
-                suppressMarkers: true, // Usamos nuestros propios marcadores
-                suppressPolylines: true // IMPORTANTE: Ocultamos la línea por defecto para dibujar las nuestras coloreadas
+                suppressMarkers: true,
+                suppressPolylines: true
             });
 
-            // Marcador del usuario
             crearMarcador({
                 lat: initialLat, lon: initialLon,
                 name: "Tu ubicación actual", type: "Usuario", municipio: "Inicio"
@@ -399,9 +425,6 @@ HTML_GOOGLE_MAPS = """
         function crearMarcador(ongData, colorOverride=null, escala=1) {
             const color = colorOverride || getMarkerColor(ongData.type);
             const pos = { lat: ongData.lat, lng: ongData.lon };
-            
-            // Opacidad: Si no es parte de la ruta (escala 1), lo hacemos un poco transparente
-            // Esto ayuda visualmente a distinguir la ruta principal del resto.
             const opacity = escala > 1 ? 1.0 : 0.6; 
             
             const marker = new google.maps.Marker({
@@ -414,7 +437,7 @@ HTML_GOOGLE_MAPS = """
                     strokeWeight: 1, 
                     strokeColor: 'white'
                 },
-                zIndex: escala > 1 ? 100 : 1 // Ruta encima de los demás
+                zIndex: escala > 1 ? 100 : 1
             });
             
             const contentString = `
@@ -444,34 +467,44 @@ HTML_GOOGLE_MAPS = """
                     return;
                 }
 
-                // 1. Mostrar TODOS los marcadores (Objetivo 1 del usuario)
                 if (data.todos_nodos) {
                     data.todos_nodos.forEach(ong => {
-                        // Creamos marcadores pequeños para el contexto general
                         crearMarcador(ong, null, 0.8);
                     });
                 }
 
-                // 2. Trazar la ruta y resaltar los marcadores de la ruta
                 const ruta = data.ruta_secuencial;
                 if (ruta && ruta.length > 0) {
                     
-                    // Actualizar panel de info
                     document.getElementById("start-name").innerText = ruta[0].name;
                     document.getElementById("end-name").innerText = ruta[ruta.length - 1].name;
                     document.getElementById("total-stops").innerText = ruta.length;
+                    
+                    // --- AQUÍ ESTÁ EL CAMBIO PRINCIPAL (JS) ---
+                    const routeListEl = document.getElementById("route-list");
+                    routeListEl.innerHTML = ""; // Limpiar
+                    
+                    ruta.forEach((ong, index) => {
+                        const itemHtml = `
+                            <div class="route-item">
+                                <div class="route-item-name">${index + 1}. ${ong.name}</div>
+                                <div class="route-item-details">
+                                    Tipo: ${ong.type || 'N/A'} <br>
+                                    Ubicación: ${ong.municipio || 'N/A'}
+                                </div>
+                            </div>
+                        `;
+                        routeListEl.insertAdjacentHTML('beforeend', itemHtml);
+                    });
+                    // ------------------------------------------
+
                     document.getElementById("toggle-btn").click();
 
-                    // Resaltar marcadores de la ruta (Los dibujamos encima y más grandes)
                     ruta.forEach(ong => {
                          crearMarcador(ong, null, 1.3);
                     });
 
-                    // Trazar ruta coloreada por tramos (Objetivo 2 del usuario)
-                    trazarRutaConColores(
-                        { lat: initialLat, lng: initialLon }, 
-                        ruta
-                    );
+                    trazarRutaConColores({ lat: initialLat, lng: initialLon }, ruta);
                 }
 
             } catch (e) {
@@ -486,9 +519,7 @@ HTML_GOOGLE_MAPS = """
             const destinoFinal = listaOngs[listaOngs.length - 1];
             const coordsDestino = { lat: destinoFinal.lat, lng: destinoFinal.lon };
 
-            // Preparamos waypoints (paradas intermedias)
             const waypoints = [];
-            // Google Maps JS API Free/Standard permite hasta 25 waypoints en total
             for (let i = 0; i < listaOngs.length - 1 && i < 23; i++) {
                 waypoints.push({
                     location: { lat: listaOngs[i].lat, lng: listaOngs[i].lon },
@@ -506,10 +537,7 @@ HTML_GOOGLE_MAPS = """
 
             directionsService.route(request, function(result, status) {
                 if (status == google.maps.DirectionsStatus.OK) {
-                    // El renderer ajusta el zoom y centra el mapa, pero NO dibuja la línea (porque suppressPolylines: true)
                     directionsRenderer.setDirections(result);
-                    
-                    // Aquí dibujamos nosotros las líneas coloreadas
                     renderColoredLegs(result, listaOngs);
                 } else {
                     console.error("Ruta fallida: " + status);
@@ -518,42 +546,28 @@ HTML_GOOGLE_MAPS = """
         }
 
         function renderColoredLegs(directionResult, rutaSecuencial) {
-            // directionResult.routes[0].legs contiene los tramos.
-            // Leg 0: OrigenUsuario -> ONG 1
-            // Leg 1: ONG 1 -> ONG 2
-            // ...
-            // rutaSecuencial[0] es la ONG 1.
-            
             const legs = directionResult.routes[0].legs;
             
             for (let i = 0; i < legs.length; i++) {
                 const leg = legs[i];
-                
-                // Determinar el color basado en el destino de este tramo.
-                // El destino del tramo 'i' corresponde al nodo 'i' en rutaSecuencial.
-                // (Porque rutaSecuencial empieza en la primera parada).
-                
                 let colorTramo = riskColorMap['Desconocido'];
                 
                 if (i < rutaSecuencial.length) {
                     const nodoDestino = rutaSecuencial[i];
-                    const nivelRiesgo = nodoDestino.riesgo_nivel; // "Alto", "Medio", "Bajo"
+                    const nivelRiesgo = nodoDestino.riesgo_nivel;
                     colorTramo = riskColorMap[nivelRiesgo] || riskColorMap['Desconocido'];
                 }
 
-                // Crear la polilínea para este tramo específico
                 const legPolyline = new google.maps.Polyline({
-                    path: [], // Se llena abajo
+                    path: [],
                     strokeColor: colorTramo,
                     strokeOpacity: 0.8,
                     strokeWeight: 6,
                     map: map
                 });
 
-                // Un 'leg' se compone de muchos 'steps'. Necesitamos todos los puntos.
                 const path = [];
                 leg.steps.forEach(step => {
-                    // step.path contiene los puntos lat/lng detallados de ese paso
                     step.path.forEach(latlng => {
                         path.push(latlng);
                     });
