@@ -25,7 +25,7 @@ DB_CONFIG = {
     'dbname': result.path.lstrip('/')
 }
 
-# Pool de conexiones (máximo 5 conexiones simultáneas)
+# Pool de conexiones
 connection_pool = pool.SimpleConnectionPool(1, 5, **DB_CONFIG)
 
 @contextmanager
@@ -74,7 +74,6 @@ def conectar_y_leer_sql(query):
 
 def cargar_nodos():
     """Carga ONGs y Fronteras con caché"""
-    # Si está en caché y no expiró, devolver del caché
     if cache.nodos is not None and not cache.is_expired():
         return cache.nodos
     
@@ -91,7 +90,7 @@ def cargar_nodos():
             nodos.append({
                 'id': row['id_ong'],
                 'name': row['nom_ong'],
-                'type': str(row['tipo']).strip().lower(),  # Normalizar
+                'type': str(row['tipo']).strip().lower(),
                 'lat': float(row['latitud']),
                 'lon': float(row['longitud']),
                 'municipio': row['nom_municipio']
@@ -100,7 +99,6 @@ def cargar_nodos():
             print(f"⚠️ Fila ignorada: {e}")
             continue
     
-    # Guardar en caché
     cache.nodos = nodos
     cache.last_update = time.time()
     return nodos
@@ -114,20 +112,16 @@ def construir_grafo_logico(nodos, radio_conexion_km=150):
     
     G = nx.DiGraph()
     
-    # Agregar nodos
     for n in nodos:
         G.add_node(n['id'], **n)
     
-    # OPTIMIZACIÓN: Usar índice espacial o agrupar por municipio
-    # Para simplificar, dividimos en bloques si hay muchos nodos
     print(f"[INFO] Construyendo grafo con {len(nodos)} nodos...")
     
     for i, nodo_i in enumerate(nodos):
         for j, nodo_j in enumerate(nodos):
-            if i >= j:  # Evitar duplicados innecesarios
+            if i >= j:
                 continue
             
-            # Regla: solo norte o mismo municipio
             if nodo_j['lat'] > nodo_i['lat']:
                 dist = geodesic(
                     (nodo_i['lat'], nodo_i['lon']), 
@@ -149,7 +143,6 @@ def encontrar_ruta_optima(origen_lat, origen_lon, nodos):
     
     G = construir_grafo_logico(nodos)
     
-    # Validar que el grafo no esté vacío
     if G.number_of_nodes() == 0:
         return {"error": "El grafo está vacío. Verifica la BD."}
     
@@ -161,7 +154,6 @@ def encontrar_ruta_optima(origen_lat, origen_lon, nodos):
     except Exception as e:
         return {"error": f"No se pudo encontrar nodo de inicio: {e}"}
     
-    # Buscar fronteras (normalizado)
     fronteras = [n for n in nodos if n['type'] == 'frontera']
     
     if not fronteras:
@@ -192,7 +184,6 @@ def encontrar_ruta_optima(origen_lat, origen_lon, nodos):
     if not mejor_ruta:
         return {"error": "No se encontró camino a la frontera"}
     
-    # Construir respuesta
     ruta_detallada = [{'lat': origen_lat, 'lon': origen_lon, 'type': 'User'}]
     
     for nid in mejor_ruta:
@@ -220,7 +211,6 @@ def api_ruta():
         if lat is None or lon is None:
             return jsonify({"success": False, "msg": "Faltan parámetros lat y lon"}), 400
         
-        # Validar rangos
         if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
             return jsonify({"success": False, "msg": "Coordenadas fuera de rango"}), 400
         
@@ -238,7 +228,7 @@ def api_ruta():
 
 @app.route('/api/auth/login', methods=['POST'])
 def api_login():
-    """Endpoint de autenticación básico (agregar según tu modelo)"""
+    """Endpoint de autenticación básico"""
     try:
         data = request.get_json() or {}
         usuario = data.get('usuario')
@@ -247,8 +237,6 @@ def api_login():
         if not usuario or not contraseña:
             return jsonify({"success": False, "msg": "Usuario y contraseña requeridos"}), 400
         
-        # TODO: Implementar lógica real de autenticación
-        # Por ahora, aceptar cualquier credencial como demo
         return jsonify({
             "success": True,
             "token": "demo_token_123",
@@ -259,9 +247,29 @@ def api_login():
         return jsonify({"success": False, "msg": str(e)}), 500
 
 
-@app.route('/mapa')
+# ✅ NUEVO: Endpoint /mapa mejorado que ACEPTA parámetros GET
+@app.route('/mapa', methods=['GET'])
 def mapa_google():
-    return render_template_string(HTML_GOOGLE_MAPS)
+    """
+    Acepta parámetros GET:
+    - lat: Latitud del usuario
+    - lon: Longitud del usuario
+    - id_usuario: ID del usuario (para logging)
+    
+    Si no se proporcionan, usa valores por defecto
+    """
+    lat = request.args.get('lat', default='19.325521', type=str)
+    lon = request.args.get('lon', default='-99.167807', type=str)
+    id_usuario = request.args.get('id_usuario', default='0', type=str)
+    
+    # Pasar las variables al template HTML
+    html = render_template_string(
+        HTML_GOOGLE_MAPS,
+        lat=lat,
+        lon=lon,
+        id_usuario=id_usuario
+    )
+    return html
 
 
 @app.route('/health', methods=['GET'])
@@ -270,7 +278,14 @@ def health_check():
     return jsonify({"status": "ok"}), 200
 
 
-# --- PLANTILLA HTML (SIN CAMBIOS) ---
+# ✅ NUEVO: Servir favicon.ico (elimina errores 404)
+@app.route('/favicon.ico')
+def favicon():
+    """Devuelve un favicon vacío para evitar errores 404"""
+    return '', 204
+
+
+# --- PLANTILLA HTML MEJORADA ---
 HTML_GOOGLE_MAPS = """
 <!DOCTYPE html>
 <html>
@@ -295,7 +310,7 @@ HTML_GOOGLE_MAPS = """
 <body>
     <div id="info-box">
         <h3 style="margin-top:0">🗺️ Ruta Segura a Frontera</h3>
-        <div id="status">Esperando ubicación...</div>
+        <div id="status">Inicializando...</div>
         <button id="btn-ruta" class="btn" onclick="iniciarCalculo()" style="display:none; margin-top:10px;">
             📍 Trazar Ruta
         </button>
@@ -305,6 +320,11 @@ HTML_GOOGLE_MAPS = """
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAHQChFMbUZcIKS3srHRzEoIHSPEtJ5GFQ&libraries=places"></script>
     
     <script>
+        // ✅ NUEVAS VARIABLES: Recibir parámetros del servidor Python
+        const initialLat = parseFloat("{{ lat }}");
+        const initialLon = parseFloat("{{ lon }}");
+        const idUsuario = "{{ id_usuario }}";
+        
         let map;
         let directionsService;
         let userPos;
@@ -313,37 +333,31 @@ HTML_GOOGLE_MAPS = """
         function initMap() {
             directionsService = new google.maps.DirectionsService();
             map = new google.maps.Map(document.getElementById("map"), {
-                zoom: 5,
-                center: { lat: 23.6345, lng: -102.5528 },
+                zoom: 10,
+                center: { lat: initialLat, lng: initialLon },
                 mapTypeControl: false,
                 streetViewControl: false
             });
 
-            if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition(
-                    (position) => {
-                        userPos = {
-                            lat: position.coords.latitude,
-                            lng: position.coords.longitude
-                        };
-                        map.setCenter(userPos);
-                        map.setZoom(10);
-                        
-                        new google.maps.Marker({
-                            position: userPos,
-                            map: map,
-                            title: "Tu ubicación",
-                            icon: "http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
-                        });
-                        
-                        document.getElementById("status").innerText = "Ubicación detectada.";
-                        document.getElementById("btn-ruta").style.display = "block";
-                    },
-                    () => { handleLocationError(true); }
-                );
-            } else {
-                handleLocationError(false);
-            }
+            // ✅ CAMBIO: Usar ubicación enviada por Android en lugar de pedir permiso
+            userPos = {
+                lat: initialLat,
+                lng: initialLon
+            };
+            
+            map.setCenter(userPos);
+            map.setZoom(10);
+            
+            new google.maps.Marker({
+                position: userPos,
+                map: map,
+                title: "Tu ubicación",
+                icon: "http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
+            });
+            
+            document.getElementById("status").innerText = 
+                `Ubicación: ${userPos.lat.toFixed(4)}, ${userPos.lng.toFixed(4)}\nUsuario: ${idUsuario}`;
+            document.getElementById("btn-ruta").style.display = "block";
         }
 
         async function iniciarCalculo() {
@@ -356,7 +370,8 @@ HTML_GOOGLE_MAPS = """
                 if (!data.success) throw new Error(data.msg);
                 
                 const nodos = data.data;
-                document.getElementById("status").innerText = `✅ Ruta encontrada: ${nodos.length} puntos. Dibujando...`;
+                document.getElementById("status").innerText = 
+                    `✅ Ruta encontrada: ${nodos.length} puntos. Dibujando...`;
                 
                 dibujarRutaCompleta(nodos);
                 
@@ -413,12 +428,6 @@ HTML_GOOGLE_MAPS = """
             });
         }
 
-        function handleLocationError(browserHasGeolocation) {
-             document.getElementById("status").innerText = browserHasGeolocation
-                ? "Error: Falló el servicio de geolocalización."
-                : "Error: Tu navegador no soporta geolocalización.";
-        }
-
         window.onload = initMap;
     </script>
 </body>
@@ -428,4 +437,4 @@ HTML_GOOGLE_MAPS = """
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False)  # debug=False en producción
+    app.run(host='0.0.0.0', port=port, debug=False)
