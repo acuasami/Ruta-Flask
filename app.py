@@ -12,7 +12,7 @@ import time
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN BD CON POOL ---
-# Nota: Asegúrate de que esta URL sea correcta y accesible desde donde ejecutes el código
+# Reemplaza con tu URL de producción si es necesario
 uri = 'postgresql://postgres:KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ@switchyard.proxy.rlwy.net:13155/railway'
 result = urlparse(uri)
 DB_CONFIG = {
@@ -70,7 +70,7 @@ def cargar_nodos():
     if cache.nodos is not None and not cache.is_expired():
         return cache.nodos
     
-    # Normalizamos el tipo para evitar errores de mayúsculas/minúsculas
+    # Obtenemos municipio y tipo
     query = """
     SELECT o.id_ong, o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
     FROM public.ongs o
@@ -81,9 +81,7 @@ def cargar_nodos():
     nodos = []
     for _, row in df.iterrows():
         try:
-            # Limpieza básica del tipo de ONG
             tipo_raw = str(row['tipo']).strip()
-            # Capitalizar primera letra (ej: "albergue" -> "Albergue") para coincidir con tu diccionario
             tipo_fmt = tipo_raw.capitalize() 
 
             nodos.append({
@@ -102,7 +100,7 @@ def cargar_nodos():
     return nodos
 
 def cargar_datos_riesgo():
-    """Carga riesgo por municipio"""
+    """Carga riesgo por municipio y normaliza el diccionario"""
     if cache.riesgo is not None and not cache.is_expired():
         return cache.riesgo
     
@@ -114,14 +112,19 @@ def cargar_datos_riesgo():
             return {}
         
         df_fecha['fecha'] = pd.to_datetime(df_fecha['fecha'])
-        # Usar el último registro disponible
         ultimo_fecha = df_fecha['fecha'].max()
         
         df_ultimo = df_fecha[(df_fecha['fecha'].dt.month == ultimo_fecha.month) &
                              (df_fecha['fecha'].dt.year == ultimo_fecha.year)]
         
         df_riesgo = pd.merge(df_ultimo, df_municipio, on='id_municipio')
-        riesgo_dict = dict(zip(df_riesgo['nom_municipio'], df_riesgo['grado']))
+        
+        # Limpiamos espacios en blanco para asegurar coincidencias
+        riesgo_dict = {}
+        for _, row in df_riesgo.iterrows():
+            mun = str(row['nom_municipio']).strip()
+            grado = str(row['grado']).strip().capitalize() # Asegura formato 'Alto', 'Medio', 'Bajo'
+            riesgo_dict[mun] = grado
         
         cache.riesgo = riesgo_dict
         return riesgo_dict
@@ -131,7 +134,6 @@ def cargar_datos_riesgo():
 
 # --- LÓGICA DE BÚSQUEDA ---
 def ong_mas_cercana(pos_actual, nodos):
-    """Encuentra la ONG más cercana (geodésica para selección rápida)"""
     if not nodos:
         return None
     
@@ -148,7 +150,6 @@ def ong_mas_cercana(pos_actual, nodos):
     return ong_cercana
 
 def find_ongs_north(start, nodos, current_ong=None):
-    """Encuentra ONGs al NORTE"""
     candidates = []
     start_lat, _ = start
     
@@ -176,7 +177,7 @@ def api_ruta():
             return jsonify({"success": False, "msg": "Faltan parámetros lat y lon"}), 400
         
         nodos = cargar_nodos()
-        riesgo = cargar_datos_riesgo()
+        riesgo_dict = cargar_datos_riesgo()
         
         if not nodos:
             return jsonify({"success": False, "msg": "No hay ONGs en la BD"}), 400
@@ -185,16 +186,37 @@ def api_ruta():
         ongs_al_norte = find_ongs_north((lat, lon), nodos, ong_cercana)
         siguiente_recomendacion = ongs_al_norte[0] if ongs_al_norte else None
         
+        # --- LÓGICA DE COLOR DE RUTA ---
+        route_color = "#808080" # Gris por defecto
+        riesgo_detectado = "Desconocido"
+        
+        if ong_cercana:
+            municipio_ong = str(ong_cercana.get('municipio', '')).strip()
+            riesgo_detectado = riesgo_dict.get(municipio_ong, "Desconocido")
+            
+            # Asignar color según riesgo
+            if riesgo_detectado == "Alto":
+                route_color = "#FF0000" # Rojo
+            elif riesgo_detectado == "Medio":
+                route_color = "#FFA500" # Naranja
+            elif riesgo_detectado == "Bajo":
+                route_color = "#008000" # Verde
+            
+            # Inyectamos datos extra a la ONG para el frontend
+            ong_cercana['riesgo_nivel'] = riesgo_detectado
+            ong_cercana['ruta_color'] = route_color
+
         return jsonify({
             "success": True,
             "ong_cercana": ong_cercana,
             "siguiente_recomendacion": siguiente_recomendacion,
             "todas_ongs": nodos,
-            "riesgo_por_municipio": riesgo,
+            "riesgo_por_municipio": riesgo_dict,
             "ongs_al_norte": ongs_al_norte[:5]
         })
         
     except Exception as e:
+        print(f"Error api: {e}")
         return jsonify({"success": False, "msg": f"Error: {str(e)}"}), 500
 
 @app.route('/mapa', methods=['GET'])
@@ -233,10 +255,9 @@ HTML_GOOGLE_MAPS = """
             box-shadow: 0 4px 15px rgba(0,0,0,0.2); z-index: 10;
             max-width: 400px; max-height: 40vh; overflow-y: auto;
             margin-left: auto; margin-right: auto;
-            display: none; /* Oculto por defecto */
+            display: none;
         }
         
-        /* Botón Flotante */
         #toggle-btn {
             position: fixed; bottom: 30px; right: 20px;
             background: #4285F4; color: white; width: 50px; height: 50px;
@@ -250,15 +271,22 @@ HTML_GOOGLE_MAPS = """
         .info-title { font-weight: bold; color: #555; font-size: 0.9em; }
         .info-content { font-size: 1.1em; margin-top: 2px; }
         
-        /* Leyenda */
+        /* Leyenda Mejorada */
         .legend {
             position: fixed; top: 10px; left: 10px;
-            background: rgba(255, 255, 255, 0.9); padding: 10px; border-radius: 8px;
+            background: rgba(255, 255, 255, 0.95); padding: 10px; border-radius: 8px;
             box-shadow: 0 2px 5px rgba(0,0,0,0.1); z-index: 10;
             font-size: 12px;
+            max-width: 150px;
         }
+        .legend-title { font-weight: bold; margin-bottom: 5px; border-bottom: 1px solid #ccc; padding-bottom: 2px; }
         .legend-item { display: flex; align-items: center; margin-bottom: 4px; }
-        .dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; display: inline-block; }
+        
+        /* Puntos (Marcadores) */
+        .dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; display: inline-block; border: 1px solid #fff; }
+        
+        /* Líneas (Riesgo) */
+        .line { width: 20px; height: 4px; margin-right: 8px; display: inline-block; border-radius: 2px; }
     </style>
 </head>
 <body>
@@ -276,8 +304,8 @@ HTML_GOOGLE_MAPS = """
                 <div style="font-size:0.9em; color:#777;" id="dest-meta"></div>
             </div>
              <div class="info-section">
-                <div class="info-title">Riesgo en la zona:</div>
-                <div class="info-content" id="risk-level"></div>
+                <div class="info-title">Nivel de Riesgo (Color Ruta):</div>
+                <div class="info-content" id="risk-level" style="font-weight:bold;"></div>
             </div>
             <div class="info-section">
                 <div class="info-title">Siguiente Parada (Norte):</div>
@@ -287,10 +315,15 @@ HTML_GOOGLE_MAPS = """
     </div>
     
     <div class="legend">
+        <div class="legend-title">Tipo de ONG</div>
         <div class="legend-item"><span class="dot" style="background:blue;"></span>Albergue</div>
         <div class="legend-item"><span class="dot" style="background:orange;"></span>Comedor</div>
         <div class="legend-item"><span class="dot" style="background:red;"></span>Frontera</div>
-        <div class="legend-item"><span class="dot" style="background:purple;"></span>Tu Ubicación</div>
+        
+        <div class="legend-title" style="margin-top:8px;">Riesgo de Ruta</div>
+        <div class="legend-item"><span class="line" style="background:green;"></span>Riesgo Bajo</div>
+        <div class="legend-item"><span class="line" style="background:orange;"></span>Riesgo Medio</div>
+        <div class="legend-item"><span class="line" style="background:red;"></span>Riesgo Alto</div>
     </div>
 
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAHQChFMbUZcIKS3srHRzEoIHSPEtJ5GFQ"></script>
@@ -303,32 +336,23 @@ HTML_GOOGLE_MAPS = """
         let directionsService;
         let directionsRenderer;
         
-        // CONFIGURACIÓN DE COLORES SOLICITADA
-        const colorMap = {
+        // Mapa de colores para MARCADORES (Puntos)
+        const markerColorMap = {
             'Albergue': 'blue',
             'Comedor': 'orange',
             'Frontera': 'red',
             'default': 'gray'
         };
 
-        function getColor(type) {
-            // Aseguramos coincidencia insensible a mayúsculas
-            if (!type) return colorMap['default'];
-            // Capitalizar (ej: albergue -> Albergue)
+        function getMarkerColor(type) {
+            if (!type) return markerColorMap['default'];
             const formatted = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
-            return colorMap[formatted] || colorMap['default'];
+            return markerColorMap[formatted] || markerColorMap['default'];
         }
 
-        // Estilos para ocultar POIs de Google (tiendas, etc) y dejar mapa limpio
         const mapStyles = [
-            {
-                "featureType": "poi",
-                "stylers": [{ "visibility": "off" }]
-            },
-            {
-                "featureType": "transit",
-                "stylers": [{ "visibility": "off" }]
-            }
+            { "featureType": "poi", "stylers": [{ "visibility": "off" }] },
+            { "featureType": "transit", "stylers": [{ "visibility": "off" }] }
         ];
 
         function initMap() {
@@ -337,37 +361,42 @@ HTML_GOOGLE_MAPS = """
             map = new google.maps.Map(document.getElementById("map"), {
                 zoom: 12,
                 center: userPos,
-                styles: mapStyles, // Aplicar limpieza
+                styles: mapStyles,
                 mapTypeControl: false,
                 streetViewControl: false,
                 fullscreenControl: false
             });
 
-            // Servicios de ruta
             directionsService = new google.maps.DirectionsService();
+            // Inicializamos el renderer, pero el color se definirá dinámicamente luego
             directionsRenderer = new google.maps.DirectionsRenderer({
                 map: map,
-                suppressMarkers: true, // IMPORTANTE: Ocultar marcadores A/B por defecto de Google
-                polylineOptions: {
-                    strokeColor: "#4285F4",
-                    strokeWeight: 5,
-                    strokeOpacity: 0.8
-                }
+                suppressMarkers: true, 
+                preserveViewport: false
             });
 
-            // 1. Marcador del USUARIO (Negro)
-            crearMarcador(userPos, "Tu ubicación", "purple", 1.2);
+            // Marcador del usuario
+            // Pasamos un objeto dummy para que funcione la función genérica
+            crearMarcador({
+                lat: initialLat,
+                lon: initialLon,
+                name: "Tu ubicación",
+                type: "Usuario",
+                municipio: "Actual"
+            }, "purple", 1.2);
 
-            // Cargar datos del backend
             cargarDatos();
         }
 
-        function crearMarcador(pos, titulo, color, escala=1) {
-            // Crear icono vectorial (círculo)
+        // --- FUNCIÓN MODIFICADA PARA FICHAS INFORMATIVAS ---
+        function crearMarcador(ongData, colorOverride=null, escala=1) {
+            const color = colorOverride || getMarkerColor(ongData.type);
+            const pos = { lat: ongData.lat, lng: ongData.lon };
+            
             const marker = new google.maps.Marker({
                 position: pos,
                 map: map,
-                title: titulo,
+                title: ongData.name,
                 icon: {
                     path: google.maps.SymbolPath.CIRCLE,
                     scale: 8 * escala,
@@ -378,9 +407,21 @@ HTML_GOOGLE_MAPS = """
                 }
             });
             
-            // Info window simple al hacer click
+            // CONTENIDO HTML DE LA FICHA (Popup)
+            const contentString = `
+                <div style="font-family: Arial, sans-serif; padding: 5px; min-width: 150px;">
+                    <h3 style="margin: 0 0 5px 0; color: #333; font-size: 16px;">${ongData.name}</h3>
+                    <p style="margin: 2px 0; font-size: 13px;">
+                        <strong>Tipo:</strong> ${ongData.type || 'N/A'}
+                    </p>
+                    <p style="margin: 2px 0; font-size: 13px;">
+                        <strong>Municipio:</strong> ${ongData.municipio || 'N/A'}
+                    </p>
+                </div>
+            `;
+            
             const infoWindow = new google.maps.InfoWindow({
-                content: `<div style="padding:5px"><b>${titulo}</b></div>`
+                content: contentString
             });
             
             marker.addListener("click", () => {
@@ -399,37 +440,39 @@ HTML_GOOGLE_MAPS = """
                 document.getElementById("content").style.display = "block";
 
                 if (!data.success) {
-                    alert("Error cargando datos: " + data.msg);
+                    alert("Error: " + data.msg);
                     return;
                 }
 
-                // A. DIBUJAR TODAS LAS ONGS
+                // 1. DIBUJAR MARCADORES
                 if (data.todas_ongs) {
                     data.todas_ongs.forEach(ong => {
-                        const color = getColor(ong.type);
-                        crearMarcador({ lat: ong.lat, lng: ong.lon }, ong.name, color);
+                        crearMarcador(ong); // Usa la nueva lógica de fichas
                     });
                 }
 
-                // B. TRAZAR RUTA A LA ONG MÁS CERCANA
+                // 2. TRAZAR RUTA Y PANEL
                 if (data.ong_cercana) {
-                    // Actualizar panel
-                    document.getElementById("dest-name").innerText = data.ong_cercana.name;
-                    document.getElementById("dest-meta").innerText = `${data.ong_cercana.type} • a ${data.ong_cercana.distancia.toFixed(2)} km (lineal)`;
-                    document.getElementById("toggle-btn").click(); // Abrir panel automáticamente
-
-                    // Calcular ruta de manejo
-                    trazarRuta({ lat: initialLat, lng: initialLon }, { lat: data.ong_cercana.lat, lng: data.ong_cercana.lon });
+                    const ong = data.ong_cercana;
                     
-                    // Riesgo
-                    const mun = data.ong_cercana.municipio;
-                    const riesgo = data.riesgo_por_municipio[mun] || "Desconocido";
+                    document.getElementById("dest-name").innerText = ong.name;
+                    document.getElementById("dest-meta").innerText = `${ong.type} • ${ong.municipio}`;
+                    
+                    // Mostrar Riesgo en Texto
                     const elRiesgo = document.getElementById("risk-level");
-                    elRiesgo.innerText = `${riesgo} (${mun})`;
-                    elRiesgo.style.color = (riesgo === 'Alto') ? 'red' : (riesgo === 'Medio' ? 'orange' : 'green');
+                    elRiesgo.innerText = `${ong.riesgo_nivel}`;
+                    elRiesgo.style.color = ong.ruta_color; 
+
+                    document.getElementById("toggle-btn").click();
+
+                    // Trazar ruta pasando el color calculado en backend
+                    trazarRuta(
+                        { lat: initialLat, lng: initialLon }, 
+                        { lat: ong.lat, lng: ong.lon },
+                        ong.ruta_color // <--- COLOR DINÁMICO
+                    );
                 }
 
-                // C. RECOMENDACIÓN NORTE
                 if (data.siguiente_recomendacion) {
                     document.getElementById("rec-name").innerText = data.siguiente_recomendacion.name;
                 }
@@ -440,19 +483,27 @@ HTML_GOOGLE_MAPS = """
             }
         }
 
-        function trazarRuta(origen, destino) {
+        function trazarRuta(origen, destino, colorRuta) {
             const request = {
                 origin: origen,
                 destination: destino,
-                travelMode: google.maps.TravelMode.DRIVING // MODO VEHÍCULO
+                travelMode: google.maps.TravelMode.DRIVING
             };
+
+            // Actualizamos las opciones del renderer con el nuevo color
+            directionsRenderer.setOptions({
+                polylineOptions: {
+                    strokeColor: colorRuta,
+                    strokeWeight: 6,
+                    strokeOpacity: 0.8
+                }
+            });
 
             directionsService.route(request, function(result, status) {
                 if (status == google.maps.DirectionsStatus.OK) {
                     directionsRenderer.setDirections(result);
                 } else {
-                    console.error("Error trazando ruta: " + status);
-                    // Si falla la ruta (ej. no hay carreteras), al menos centramos el mapa
+                    console.error("Ruta fallida: " + status);
                     map.setCenter(origen);
                 }
             });
