@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# INSTALAR DEPENDENCIAS DE SISTEMA (CRÍTICO PARA OSMNX)
+# Instalar dependencias de sistema
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
@@ -16,5 +16,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Aumentamos el timeout de Gunicorn a 120s para evitar cortes en el arranque
-CMD gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 300 app:app
+# Configuración mejorada de Gunicorn
+CMD gunicorn \
+    --bind 0.0.0.0:${PORT:-8080} \
+    --workers 2 \
+    --threads 4 \
+    --worker-class gthread \
+    --timeout 120 \
+    --max-requests 1000 \
+    --max-requests-jitter 100 \
+    --graceful-timeout 30 \
+    app:app

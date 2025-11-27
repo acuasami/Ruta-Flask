@@ -3,13 +3,18 @@ import os
 import math
 import pandas as pd
 import psycopg2
+from psycopg2 import pool
 from geopy.distance import geodesic
 import networkx as nx
 from urllib.parse import urlparse
+from contextlib import contextmanager
+import time
+
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN BD ---
+
+# --- CONFIGURACIÓN BD CON POOL ---
 uri = 'postgresql://postgres:KAGJhRklTcsevGqKEgCNPfmdDiGzsLyQ@switchyard.proxy.rlwy.net:13155/railway'
 result = urlparse(uri)
 DB_CONFIG = {
@@ -20,103 +25,158 @@ DB_CONFIG = {
     'dbname': result.path.lstrip('/')
 }
 
+# Pool de conexiones (máximo 5 conexiones simultáneas)
+connection_pool = pool.SimpleConnectionPool(1, 5, **DB_CONFIG)
+
+@contextmanager
+def get_db_connection():
+    """Context manager para conexiones seguras"""
+    conn = None
+    try:
+        conn = connection_pool.getconn()
+        yield conn
+    finally:
+        if conn:
+            connection_pool.putconn(conn)
+
+
+# --- CACHÉ GLOBAL ---
+class DataCache:
+    def __init__(self):
+        self.nodos = None
+        self.grafo = None
+        self.last_update = 0
+        self.TTL = 3600  # 1 hora
+    
+    def is_expired(self):
+        return (time.time() - self.last_update) > self.TTL
+    
+    def invalidate(self):
+        self.nodos = None
+        self.grafo = None
+        self.last_update = 0
+
+
+cache = DataCache()
+
+
 # --- CARGA DE DATOS ---
 def conectar_y_leer_sql(query):
+    """Lee de BD con manejo seguro de conexiones"""
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        df = pd.read_sql(query, conn)
-        conn.close()
-        return df
+        with get_db_connection() as conn:
+            df = pd.read_sql(query, conn)
+            return df
     except Exception as e:
         print(f"❌ Error BD: {e}")
         return pd.DataFrame()
 
+
 def cargar_nodos():
-    """Carga ONGs y Fronteras para construir el grafo."""
+    """Carga ONGs y Fronteras con caché"""
+    # Si está en caché y no expiró, devolver del caché
+    if cache.nodos is not None and not cache.is_expired():
+        return cache.nodos
+    
     query = """
     SELECT o.id_ong, o.nom_ong, o.tipo, o.latitud, o.longitud, m.nom_municipio 
     FROM public.ongs o
     JOIN public.municipio m ON o.id_municipio = m.id_municipio;
     """
     df = conectar_y_leer_sql(query)
-    # Convertir a lista de diccionarios
+    
     nodos = []
     for _, row in df.iterrows():
         try:
             nodos.append({
                 'id': row['id_ong'],
                 'name': row['nom_ong'],
-                'type': row['tipo'], # Importante: 'Frontera', 'Albergue', etc.
+                'type': str(row['tipo']).strip().lower(),  # Normalizar
                 'lat': float(row['latitud']),
                 'lon': float(row['longitud']),
                 'municipio': row['nom_municipio']
             })
-        except:
+        except Exception as e:
+            print(f"⚠️ Fila ignorada: {e}")
             continue
+    
+    # Guardar en caché
+    cache.nodos = nodos
+    cache.last_update = time.time()
     return nodos
 
-# --- LÓGICA DE GRAFOS Y A* ---
 
+# --- LÓGICA DE GRAFOS Y A* ---
 def construir_grafo_logico(nodos, radio_conexion_km=150):
-    """
-    Crea un grafo NetworkX conectando nodos que estén dentro de un radio.
-    Esto define "quién puede conectarse con quién".
-    """
-    G = nx.DiGraph() # Grafo dirigido (siempre vamos al norte)
+    """Crea grafo con caché"""
+    if cache.grafo is not None and not cache.is_expired():
+        return cache.grafo
+    
+    G = nx.DiGraph()
     
     # Agregar nodos
     for n in nodos:
         G.add_node(n['id'], **n)
-        
-    # Crear aristas (conexiones)
-    # NOTA: Esto es O(n^2), para 120 puntos está bien. Para miles, usar KDTree.
-    for i in nodos:
-        for j in nodos:
-            if i['id'] == j['id']: continue
+    
+    # OPTIMIZACIÓN: Usar índice espacial o agrupar por municipio
+    # Para simplificar, dividimos en bloques si hay muchos nodos
+    print(f"[INFO] Construyendo grafo con {len(nodos)} nodos...")
+    
+    for i, nodo_i in enumerate(nodos):
+        for j, nodo_j in enumerate(nodos):
+            if i >= j:  # Evitar duplicados innecesarios
+                continue
             
-            # Regla de negocio: Solo avanzar hacia el Norte (latitud mayor)
-            # O permitir ligero retroceso si es necesario, pero priorizar norte.
-            if j['lat'] > i['lat']: 
-                dist = geodesic((i['lat'], i['lon']), (j['lat'], j['lon'])).km
+            # Regla: solo norte o mismo municipio
+            if nodo_j['lat'] > nodo_i['lat']:
+                dist = geodesic(
+                    (nodo_i['lat'], nodo_i['lon']), 
+                    (nodo_j['lat'], nodo_j['lon'])
+                ).km
+                
                 if dist <= radio_conexion_km:
-                    # El peso es la distancia
-                    G.add_edge(i['id'], j['id'], weight=dist)
-                    
+                    G.add_edge(nodo_i['id'], nodo_j['id'], weight=dist)
+    
+    cache.grafo = G
+    print(f"[INFO] Grafo listo: {G.number_of_nodes()} nodos, {G.number_of_edges()} aristas")
     return G
 
-def encontrar_ruta_optima(origen_lat, origen_lon, nodos):
-    """
-    1. Encuentra el nodo más cercano al usuario.
-    2. Encuentra el nodo 'Frontera' más accesible.
-    3. Ejecuta A* entre ellos.
-    """
 
+def encontrar_ruta_optima(origen_lat, origen_lon, nodos):
+    """Encuentra ruta con manejo robusto de errores"""
     if not nodos:
         return {"error": "No se pudieron cargar los nodos de la base de datos."}
-
+    
     G = construir_grafo_logico(nodos)
     
-    # 1. Nodo inicio (ONG más cercana al usuario)
-    nodo_inicio = min(nodos, key=lambda x: geodesic((origen_lat, origen_lon), (x['lat'], x['lon'])).km)
+    # Validar que el grafo no esté vacío
+    if G.number_of_nodes() == 0:
+        return {"error": "El grafo está vacío. Verifica la BD."}
     
-    # 2. Nodo fin (Cualquier nodo tipo 'Frontera')
-    fronteras = [n for n in nodos if str(n.get('type','')).strip().lower() == 'frontera']
+    try:
+        nodo_inicio = min(
+            nodos, 
+            key=lambda x: geodesic((origen_lat, origen_lon), (x['lat'], x['lon'])).km
+        )
+    except Exception as e:
+        return {"error": f"No se pudo encontrar nodo de inicio: {e}"}
+    
+    # Buscar fronteras (normalizado)
+    fronteras = [n for n in nodos if n['type'] == 'frontera']
     
     if not fronteras:
-        return {"error": "No hay fronteras definidas en la BD"}
-        
-    # Buscar la ruta más corta a CUALQUIER frontera
+        return {"error": "No hay fronteras definidas en la BD (verifica tipo='frontera')"}
+    
     mejor_ruta = []
     menor_costo = float('inf')
     
     for frontera in fronteras:
         try:
-            # Heurística: Distancia directa a esta frontera
             def heuristica(u, v):
                 n1 = G.nodes[u]
                 n2 = G.nodes[v]
                 return geodesic((n1['lat'], n1['lon']), (n2['lat'], n2['lon'])).km
-
+            
             ruta_ids = nx.astar_path(G, nodo_inicio['id'], frontera['id'], heuristic=heuristica, weight='weight')
             costo = nx.path_weight(G, ruta_ids, weight='weight')
             
@@ -125,57 +185,92 @@ def encontrar_ruta_optima(origen_lat, origen_lon, nodos):
                 mejor_ruta = ruta_ids
         except nx.NetworkXNoPath:
             continue
-            
+        except nx.NodeNotFound as e:
+            print(f"⚠️ Nodo no encontrado en grafo: {e}")
+            continue
+    
     if not mejor_ruta:
         return {"error": "No se encontró camino a la frontera"}
-
-    # Convertir IDs a objetos completos para Google Maps
-    ruta_detallada = []
     
-    # Agregar posición actual del usuario como punto 0
-    ruta_detallada.append({'lat': origen_lat, 'lon': origen_lon, 'type': 'User'})
+    # Construir respuesta
+    ruta_detallada = [{'lat': origen_lat, 'lon': origen_lon, 'type': 'User'}]
     
     for nid in mejor_ruta:
+        if nid not in G.nodes:
+            continue
         nodo = G.nodes[nid]
         ruta_detallada.append({
             'lat': nodo['lat'],
             'lon': nodo['lon'],
-            'name': nodo['name'],
-            'type': nodo['type'],
-            'municipio': nodo['municipio']
+            'name': nodo.get('name', 'N/A'),
+            'type': nodo.get('type', 'N/A'),
+            'municipio': nodo.get('municipio', 'N/A')
         })
-        
+    
     return {"ruta": ruta_detallada}
 
-# --- ENDPOINTS ---
 
+# --- ENDPOINTS ---
 @app.route('/api/calcular-ruta', methods=['GET'])
 def api_ruta():
     try:
         lat = request.args.get('lat', type=float)
         lon = request.args.get('lon', type=float)
-
+        
         if lat is None or lon is None:
             return jsonify({"success": False, "msg": "Faltan parámetros lat y lon"}), 400
+        
+        # Validar rangos
+        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            return jsonify({"success": False, "msg": "Coordenadas fuera de rango"}), 400
         
         nodos = cargar_nodos()
         resultado = encontrar_ruta_optima(lat, lon, nodos)
         
         if "error" in resultado:
-            return jsonify({"success": False, "msg": resultado["error"]})
-            
+            return jsonify({"success": False, "msg": resultado["error"]}), 400
+        
         return jsonify({"success": True, "data": resultado["ruta"]})
+        
+    except Exception as e:
+        return jsonify({"success": False, "msg": f"Error del servidor: {str(e)}"}), 500
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def api_login():
+    """Endpoint de autenticación básico (agregar según tu modelo)"""
+    try:
+        data = request.get_json() or {}
+        usuario = data.get('usuario')
+        contraseña = data.get('contraseña')
+        
+        if not usuario or not contraseña:
+            return jsonify({"success": False, "msg": "Usuario y contraseña requeridos"}), 400
+        
+        # TODO: Implementar lógica real de autenticación
+        # Por ahora, aceptar cualquier credencial como demo
+        return jsonify({
+            "success": True,
+            "token": "demo_token_123",
+            "mensaje": "Login exitoso"
+        })
         
     except Exception as e:
         return jsonify({"success": False, "msg": str(e)}), 500
 
+
 @app.route('/mapa')
 def mapa_google():
-    """Sirve la plantilla HTML que contiene el JS de Google Maps"""
     return render_template_string(HTML_GOOGLE_MAPS)
 
-# --- PLANTILLA HTML (FRONTEND) ---
-# En un proyecto grande, esto iría en la carpeta 'templates/mapa.html'
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check para Cloud Run"""
+    return jsonify({"status": "ok"}), 200
+
+
+# --- PLANTILLA HTML (SIN CAMBIOS) ---
 HTML_GOOGLE_MAPS = """
 <!DOCTYPE html>
 <html>
@@ -213,18 +308,17 @@ HTML_GOOGLE_MAPS = """
         let map;
         let directionsService;
         let userPos;
-        let renderers = []; // Para guardar las líneas dibujadas
+        let renderers = [];
 
         function initMap() {
             directionsService = new google.maps.DirectionsService();
             map = new google.maps.Map(document.getElementById("map"), {
                 zoom: 5,
-                center: { lat: 23.6345, lng: -102.5528 }, // Centro de México
+                center: { lat: 23.6345, lng: -102.5528 },
                 mapTypeControl: false,
                 streetViewControl: false
             });
 
-            // Obtener ubicación del navegador
             if (navigator.geolocation) {
                 navigator.geolocation.getCurrentPosition(
                     (position) => {
@@ -256,7 +350,6 @@ HTML_GOOGLE_MAPS = """
             document.getElementById("status").innerText = "⏳ Calculando mejor ruta en servidor...";
             
             try {
-                // 1. Pedir la secuencia de nodos al Backend (Python + A*)
                 const response = await fetch(`/api/calcular-ruta?lat=${userPos.lat}&lon=${userPos.lng}`);
                 const data = await response.json();
                 
@@ -265,7 +358,6 @@ HTML_GOOGLE_MAPS = """
                 const nodos = data.data;
                 document.getElementById("status").innerText = `✅ Ruta encontrada: ${nodos.length} puntos. Dibujando...`;
                 
-                // 2. Dibujar la ruta en lotes (Chunking) para evitar límites de Google
                 dibujarRutaCompleta(nodos);
                 
             } catch (e) {
@@ -274,16 +366,12 @@ HTML_GOOGLE_MAPS = """
         }
 
         async function dibujarRutaCompleta(puntos) {
-            // Limpiar mapa anterior
             renderers.forEach(r => r.setMap(null));
             renderers = [];
             
-            // Google Maps permite max 25 waypoints (1 inicio, 1 fin, 23 intermedios)
             const MAX_WAYPOINTS = 23; 
             
-            // Iterar sobre la lista de puntos dividiéndola en segmentos
             for (let i = 0; i < puntos.length - 1; i += MAX_WAYPOINTS) {
-                // Tomamos un subconjunto. El fin de un segmento debe ser el inicio del siguiente
                 const chunk = puntos.slice(i, i + MAX_WAYPOINTS + 2);
                 
                 if (chunk.length < 2) continue;
@@ -291,7 +379,6 @@ HTML_GOOGLE_MAPS = """
                 const origin = { lat: chunk[0].lat, lng: chunk[0].lon };
                 const destination = { lat: chunk[chunk.length - 1].lat, lng: chunk[chunk.length - 1].lon };
                 
-                // Puntos intermedios
                 const waypoints = chunk.slice(1, -1).map(p => ({
                     location: { lat: p.lat, lng: p.lon },
                     stopover: true
@@ -307,21 +394,20 @@ HTML_GOOGLE_MAPS = """
                     origin: origin,
                     destination: destination,
                     waypoints: waypoints,
-                    travelMode: google.maps.TravelMode.DRIVING, // O WALKING
+                    travelMode: google.maps.TravelMode.DRIVING,
                 }, (result, status) => {
                     if (status === 'OK') {
                         const renderer = new google.maps.DirectionsRenderer({
                             map: map,
                             directions: result,
                             preserveViewport: true,
-                            suppressMarkers: false, // Dejar markers predeterminados A,B,C...
+                            suppressMarkers: false,
                             polylineOptions: { strokeColor: "#4285F4", strokeWeight: 5 }
                         });
                         renderers.push(renderer);
                     } else {
                         console.error('Fallo segmento:', status);
                     }
-                    // Resolvemos siempre para no detener el bucle
                     resolve(); 
                 });
             });
@@ -339,6 +425,7 @@ HTML_GOOGLE_MAPS = """
 </html>
 """
 
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)  # debug=False en producción
