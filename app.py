@@ -359,7 +359,6 @@ HTML_GOOGLE_MAPS = """
         <div class="legend-item"><span class="line" style="background:green;"></span>Riesgo Bajo</div>
         <div class="legend-item"><span class="line" style="background:orange;"></span>Riesgo Medio</div>
         <div class="legend-item"><span class="line" style="background:red;"></span>Riesgo Alto</div>
-        <div class="legend-item"><span class="line" style="background:gray;"></span>Desconocido</div>
     </div>
 
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAHQChFMbUZcIKS3srHRzEoIHSPEtJ5GFQ"></script>
@@ -513,47 +512,101 @@ HTML_GOOGLE_MAPS = """
             }
         }
 
-        function trazarRutaConColores(origenUsuario, listaOngs) {
+        async function trazarRutaConColores(origenUsuario, listaOngs) {
             if (!listaOngs || listaOngs.length === 0) return;
 
-            const destinoFinal = listaOngs[listaOngs.length - 1];
-            const coordsDestino = { lat: destinoFinal.lat, lng: destinoFinal.lon };
+            // 1. Preparamos todos los puntos en una sola lista maestra
+            // [Usuario, ONG1, ONG2, ..., ONG_Final]
+            const todosLosPuntos = [
+                origenUsuario, 
+                ...listaOngs.map(ong => ({ lat: ong.lat, lng: ong.lon }))
+            ];
 
-            const waypoints = [];
-            for (let i = 0; i < listaOngs.length - 1 && i < 23; i++) {
-                waypoints.push({
-                    location: { lat: listaOngs[i].lat, lng: listaOngs[i].lon },
-                    stopover: true
+            const MAX_WAYPOINTS_PER_REQUEST = 23; 
+            // Google permite 25 puntos en total: 1 Origen + 1 Destino + 23 Waypoints
+            
+            const peticiones = [];
+
+            // 2. Iteramos creando "batches" (lotes)
+            // Avanzamos de 23 en 23, pero asegurando solapamiento (el fin de uno es el inicio del otro)
+            let indexActual = 0;
+
+            while (indexActual < todosLosPuntos.length - 1) {
+                // Definir el lote actual
+                const inicioBatch = indexActual;
+                // El destino es el actual + 23 (waypoints) + 1 (destino final del tramo)
+                const finBatch = Math.min(indexActual + MAX_WAYPOINTS_PER_REQUEST + 1, todosLosPuntos.length - 1);
+
+                const puntoOrigen = todosLosPuntos[inicioBatch];
+                const puntoDestino = todosLosPuntos[finBatch];
+                
+                // Los waypoints son todo lo que hay EN MEDIO de origen y destino
+                const waypointsBatch = [];
+                for (let i = inicioBatch + 1; i < finBatch; i++) {
+                    waypointsBatch.push({
+                        location: todosLosPuntos[i],
+                        stopover: true
+                    });
+                }
+
+                // Preparamos la promesa para este tramo
+                // Guardamos 'inicioBatch' para saber qué colores pintar después
+                const promesa = new Promise((resolve, reject) => {
+                    const request = {
+                        origin: puntoOrigen,
+                        destination: puntoDestino,
+                        waypoints: waypointsBatch,
+                        optimizeWaypoints: false,
+                        travelMode: google.maps.TravelMode.DRIVING
+                    };
+
+                    // Capturamos el índice base para pasarlo al renderizador de colores
+                    const baseIndexParaColores = inicioBatch; 
+
+                    directionsService.route(request, function(result, status) {
+                        if (status === google.maps.DirectionsStatus.OK) {
+                            // Importante: No usamos setDirections estándar porque borraría los tramos anteriores
+                            // directionsRenderer.setDirections(result); <--- NO USAR ESTO
+                            
+                            // Renderizamos manualmente las líneas de colores
+                            renderColoredLegs(result, listaOngs, baseIndexParaColores);
+                            resolve();
+                        } else {
+                            console.error("Fallo en tramo " + baseIndexParaColores + ": " + status);
+                            // Resolvemos aunque falle para que no bloquee otros tramos
+                            resolve(); 
+                        }
+                    });
                 });
+
+                peticiones.push(promesa);
+
+                // El siguiente batch debe empezar donde terminó este para que la linea sea continua
+                indexActual = finBatch;
             }
 
-            const request = {
-                origin: origenUsuario,
-                destination: coordsDestino,
-                waypoints: waypoints,
-                optimizeWaypoints: false, 
-                travelMode: google.maps.TravelMode.DRIVING
-            };
-
-            directionsService.route(request, function(result, status) {
-                if (status == google.maps.DirectionsStatus.OK) {
-                    directionsRenderer.setDirections(result);
-                    renderColoredLegs(result, listaOngs);
-                } else {
-                    console.error("Ruta fallida: " + status);
-                }
-            });
+            // 3. Ejecutamos todas las peticiones
+            await Promise.all(peticiones);
         }
 
-        function renderColoredLegs(directionResult, rutaSecuencial) {
+        function renderColoredLegs(directionResult, rutaSecuencial, offsetIndex) {
             const legs = directionResult.routes[0].legs;
             
             for (let i = 0; i < legs.length; i++) {
                 const leg = legs[i];
                 let colorTramo = riskColorMap['Desconocido'];
                 
-                if (i < rutaSecuencial.length) {
-                    const nodoDestino = rutaSecuencial[i];
+                // CALCULO DEL ÍNDICE REAL EN LA LISTA GLOBAL
+                // El 'offsetIndex' es donde empezó este batch en la lista global de puntos.
+                // i es el paso dentro de este batch.
+                // Nota: rutaSecuencial[0] es la primera ONG.
+                // El primer tramo del mapa va de (Usuario -> ONG0).
+                // Por tanto, el leg[0] del primer batch corresponde a rutaSecuencial[0].
+                
+                const indiceGlobal = offsetIndex + i;
+
+                if (indiceGlobal < rutaSecuencial.length) {
+                    const nodoDestino = rutaSecuencial[indiceGlobal];
                     const nivelRiesgo = nodoDestino.riesgo_nivel;
                     colorTramo = riskColorMap[nivelRiesgo] || riskColorMap['Desconocido'];
                 }
@@ -573,6 +626,8 @@ HTML_GOOGLE_MAPS = """
                     });
                 });
                 legPolyline.setPath(path);
+                
+                // Guardamos referencia por si quieres borrarlas luego
                 routePolylines.push(legPolyline);
             }
         }
