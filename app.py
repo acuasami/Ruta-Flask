@@ -255,8 +255,7 @@ def mapa_google():
 def health_check():
     return jsonify({"status": "ok"}), 200
 
-# --- PLANTILLA HTML MEJORADA PARA WAYPOINTS ---
-# --- PLANTILLA HTML MEJORADA PARA WAYPOINTS ---
+# PLANTILLA HTML MEJORADA CON INFORMACIÓN DE KILÓMETROS
 HTML_GOOGLE_MAPS = """
 <!DOCTYPE html>
 <html>
@@ -269,9 +268,9 @@ HTML_GOOGLE_MAPS = """
         
         #info-box {
             position: fixed; bottom: 20px; left: 20px; right: 20px;
-            background: white; padding: 15px; border-radius: 12px;
+            background: white; padding: 20px; border-radius: 12px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.2); z-index: 10;
-            max-width: 400px; max-height: 50vh; /* Aumentamos un poco la altura máxima */
+            max-width: 450px; max-height: 60vh;
             overflow-y: auto;
             margin-left: auto; margin-right: auto; display: none;
         }
@@ -285,80 +284,163 @@ HTML_GOOGLE_MAPS = """
             align-items: center; justify-content: center; font-size: 24px;
         }
 
-        .info-section { margin-bottom: 10px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-        .info-title { font-weight: bold; color: #555; font-size: 0.9em; }
+        .info-section { margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .info-title { font-weight: bold; color: #555; font-size: 0.9em; margin-bottom: 5px; }
         .info-content { font-size: 1.1em; margin-top: 2px; }
+        .highlight { color: #4285F4; font-weight: bold; }
+        .distance-badge {
+            background: #e8f4ff;
+            color: #4285F4;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            margin-left: 5px;
+            font-weight: bold;
+        }
 
-        /* Estilos nuevos para la lista de ruta */
+        /* Estilos para la lista de ruta */
         .route-list-container {
             margin-top: 10px;
             background-color: #f9f9f9;
             border-radius: 8px;
             padding: 10px;
-            max-height: 200px; /* Scroll interno para la lista */
+            max-height: 250px;
             overflow-y: auto;
         }
         .route-item {
-            margin-bottom: 8px;
-            padding-bottom: 8px;
+            margin-bottom: 10px;
+            padding-bottom: 10px;
             border-bottom: 1px solid #e0e0e0;
             font-size: 0.9em;
         }
         .route-item:last-child { border-bottom: none; margin-bottom: 0; }
-        .route-item-name { font-weight: bold; color: #333; }
-        .route-item-details { color: #666; font-size: 0.85em; }
+        .route-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        .route-item-name { font-weight: bold; color: #333; font-size: 1em; }
+        .route-item-distance { 
+            background: #e8f4ff;
+            color: #4285F4;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+        .route-item-details { 
+            color: #666; font-size: 0.85em;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 5px;
+            margin-top: 5px;
+        }
+        .detail-label { color: #888; }
+        .detail-value { font-weight: 500; }
+        .risk-high { color: #ff4444; }
+        .risk-medium { color: #ffaa00; }
+        .risk-low { color: #00aa44; }
         
         .legend {
             position: fixed; top: 10px; left: 10px;
-            background: rgba(255, 255, 255, 0.95); padding: 10px; border-radius: 8px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1); z-index: 10;
-            font-size: 12px; max-width: 150px;
+            background: rgba(255, 255, 255, 0.95); padding: 12px; border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 10;
+            font-size: 12px; max-width: 180px;
         }
-        .legend-title { font-weight: bold; margin-bottom: 5px; border-bottom: 1px solid #ccc; padding-bottom: 2px; }
-        .legend-item { display: flex; align-items: center; margin-bottom: 4px; }
-        .dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; display: inline-block; border: 1px solid #fff; }
-        .line { width: 20px; height: 4px; margin-right: 8px; display: inline-block; border-radius: 2px; }
+        .legend-title { 
+            font-weight: bold; margin-bottom: 8px; 
+            border-bottom: 1px solid #ccc; padding-bottom: 4px;
+            color: #333;
+        }
+        .legend-item { display: flex; align-items: center; margin-bottom: 6px; }
+        .dot { width: 14px; height: 14px; border-radius: 50%; margin-right: 8px; display: inline-block; border: 1px solid #fff; }
+        .line { width: 24px; height: 5px; margin-right: 8px; display: inline-block; border-radius: 2px; }
+        
+        /* Estadísticas */
+        .stats-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 15px;
+            background: #f0f7ff;
+            padding: 12px;
+            border-radius: 8px;
+        }
+        .stat-item {
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 1.4em;
+            font-weight: bold;
+            color: #4285F4;
+        }
+        .stat-label {
+            font-size: 0.8em;
+            color: #666;
+        }
     </style>
 </head>
 <body>
     <div id="map"></div>
-    <button id="toggle-btn" onclick="toggleInfoBox()">ℹ️</button>
+    <button id="toggle-btn" onclick="toggleInfoBox()">ℹ</button>
     
     <div id="info-box">
-        <h3 style="margin-top:0; color:#4285F4;">Ruta Sugerida a Frontera</h3>
+        <h3 style="margin-top:0; color:#4285F4; border-bottom: 2px solid #4285F4; padding-bottom: 8px;">
+            📍 Ruta Sugerida a Frontera
+        </h3>
         <div id="loading">Calculando ruta completa...</div>
         <div id="content" style="display:none;">
             <div class="info-section">
-                <div class="info-title">Punto de Partida (ONG más cercana):</div>
+                <div class="info-title">📍 Punto de Partida</div>
                 <div class="info-content" id="start-name"></div>
-            </div>
-             <div class="info-section">
-                <div class="info-title">Destino Final (Frontera):</div>
-                <div class="info-content" id="end-name" style="font-weight:bold; color:red;"></div>
-            </div>
-            <div class="info-section">
-                <div class="info-title">Total de paradas:</div>
-                <div class="info-content" id="total-stops"></div>
+                <div id="start-distance" style="font-size:0.9em; color:#666; margin-top:3px;"></div>
             </div>
             
-            <div class="info-section" style="border-bottom: none;">
-                <div class="info-title">Detalle del recorrido:</div>
-                <div id="route-list" class="route-list-container">
-                    </div>
+            <div class="info-section">
+                <div class="info-title">🎯 Destino Final (Frontera)</div>
+                <div class="info-content" id="end-name" style="font-weight:bold; color:#d32f2f;"></div>
+                <div id="total-distance" style="font-size:0.9em; color:#666; margin-top:3px;"></div>
+            </div>
+            
+            <div class="stats-container">
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-stops">0</div>
+                    <div class="stat-label">Paradas</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-distance">0 km</div>
+                    <div class="stat-label">Distancia Total</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-avg-distance">0 km</div>
+                    <div class="stat-label">Promedio por tramo</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-avg-risk">-</div>
+                    <div class="stat-label">Riesgo Promedio</div>
+                </div>
+            </div>
+            
+            <div class="info-section" style="border-bottom: none; margin-top: 15px;">
+                <div class="info-title">🗺 Detalle del Recorrido</div>
+                <div id="route-list" class="route-list-container"></div>
             </div>
         </div>
     </div>
     
     <div class="legend">
-        <div class="legend-title">Tipo de ONG</div>
-        <div class="legend-item"><span class="dot" style="background:blue;"></span>Albergue</div>
-        <div class="legend-item"><span class="dot" style="background:orange;"></span>Comedor</div>
-        <div class="legend-item"><span class="dot" style="background:red;"></span>Frontera</div>
+        <div class="legend-title">📍 Tipo de ONG</div>
+        <div class="legend-item"><span class="dot" style="background:#4285F4;"></span>Albergue</div>
+        <div class="legend-item"><span class="dot" style="background:#FF9800;"></span>Comedor</div>
+        <div class="legend-item"><span class="dot" style="background:#F44336;"></span>Frontera</div>
+        <div class="legend-item"><span class="dot" style="background:#9C27B0;"></span>Usuario</div>
         
-        <div class="legend-title" style="margin-top:8px;">Riesgo del Tramo</div>
-        <div class="legend-item"><span class="line" style="background:green;"></span>Riesgo Bajo</div>
-        <div class="legend-item"><span class="line" style="background:orange;"></span>Riesgo Medio</div>
-        <div class="legend-item"><span class="line" style="background:red;"></span>Riesgo Alto</div>
+        <div class="legend-title" style="margin-top:10px;">⚠ Nivel de Riesgo</div>
+        <div class="legend-item"><span class="line" style="background:#4CAF50;"></span>Bajo</div>
+        <div class="legend-item"><span class="line" style="background:#FF9800;"></span>Medio</div>
+        <div class="legend-item"><span class="line" style="background:#F44336;"></span>Alto</div>
+        <div class="legend-item"><span class="line" style="background:#9E9E9E;"></span>Desconocido</div>
     </div>
 
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAHQChFMbUZcIKS3srHRzEoIHSPEtJ5GFQ"></script>
@@ -371,16 +453,25 @@ HTML_GOOGLE_MAPS = """
         let directionsService;
         let directionsRenderer;
         let routePolylines = [];
+        let routeWithDistances = [];
         
         const markerColorMap = {
-            'Albergue': 'blue', 'Comedor': 'orange', 'Frontera': 'red', 'default': 'gray'
+            'Albergue': '#4285F4', 'Comedor': '#FF9800', 'Frontera': '#F44336', 
+            'Usuario': '#9C27B0', 'default': '#9E9E9E'
         };
 
         const riskColorMap = {
-            'Bajo': '#008000',   // Verde
-            'Medio': '#FFA500',  // Naranja
-            'Alto': '#FF0000',   // Rojo
-            'Desconocido': '#808080' // Gris
+            'Bajo': '#4CAF50',      // Verde
+            'Medio': '#FF9800',     // Naranja
+            'Alto': '#F44336',      // Rojo
+            'Desconocido': '#9E9E9E' // Gris
+        };
+
+        const riskTextMap = {
+            'Bajo': '🟢 Bajo',
+            'Medio': '🟡 Medio', 
+            'Alto': '🔴 Alto',
+            'Desconocido': '⚫ Desconocido'
         };
 
         function getMarkerColor(type) {
@@ -388,6 +479,7 @@ HTML_GOOGLE_MAPS = """
             if (type.includes('Albergue')) return markerColorMap['Albergue'];
             if (type.includes('Comedor')) return markerColorMap['Comedor'];
             if (type.includes('Frontera')) return markerColorMap['Frontera'];
+            if (type.includes('Usuario')) return markerColorMap['Usuario'];
             return markerColorMap['default'];
         }
 
@@ -416,35 +508,62 @@ HTML_GOOGLE_MAPS = """
             crearMarcador({
                 lat: initialLat, lon: initialLon,
                 name: "Tu ubicación actual", type: "Usuario", municipio: "Inicio"
-            }, "purple", 1.2);
+            }, markerColorMap['Usuario'], 1.5);
 
             cargarDatos();
+        }
+
+        function calcularDistanciaEntrePuntos(puntoA, puntoB) {
+            const rad = (x) => x * Math.PI / 180;
+            const R = 6371; // Radio de la Tierra en km
+            
+            const dLat = rad(puntoB.lat - puntoA.lat);
+            const dLng = rad(puntoB.lng - puntoA.lng);
+            
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(rad(puntoA.lat)) * Math.cos(rad(puntoB.lat)) *
+                      Math.sin(dLng/2) * Math.sin(dLng/2);
+            
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
         }
 
         function crearMarcador(ongData, colorOverride=null, escala=1) {
             const color = colorOverride || getMarkerColor(ongData.type);
             const pos = { lat: ongData.lat, lng: ongData.lon };
-            const opacity = escala > 1 ? 1.0 : 0.6; 
+            const opacity = escala > 1 ? 1.0 : 0.7; 
+            const size = escala > 1 ? 8 * escala : 6;
             
             const marker = new google.maps.Marker({
                 position: pos, map: map, title: ongData.name,
                 icon: {
                     path: google.maps.SymbolPath.CIRCLE,
-                    scale: 6 * escala, 
+                    scale: size, 
                     fillColor: color, 
                     fillOpacity: opacity,
-                    strokeWeight: 1, 
-                    strokeColor: 'white'
+                    strokeWeight: 1.5, 
+                    strokeColor: '#FFFFFF'
                 },
                 zIndex: escala > 1 ? 100 : 1
             });
             
             const contentString = `
-                <div style="font-family: Arial, sans-serif; padding: 5px; min-width: 150px;">
-                    <h3 style="margin: 0 0 5px 0; color: #333; font-size: 16px;">${ongData.name}</h3>
-                    <p style="margin: 2px 0; font-size: 13px;"><strong>Tipo:</strong> ${ongData.type || 'N/A'}</p>
-                    <p style="margin: 2px 0; font-size: 13px;"><strong>Municipio:</strong> ${ongData.municipio || 'N/A'}</p>
-                    <p style="margin: 2px 0; font-size: 12px; color: #666;"><strong>Riesgo:</strong> ${ongData.riesgo_nivel || 'N/A'}</p>
+                <div style="font-family: Arial, sans-serif; padding: 8px; min-width: 200px; max-width: 250px;">
+                    <h3 style="margin: 0 0 8px 0; color: #333; font-size: 16px; border-bottom: 1px solid #eee; padding-bottom: 5px;">
+                        ${ongData.name}
+                    </h3>
+                    <div style="margin: 5px 0;">
+                        <strong style="color: #555;">📍 Tipo:</strong> ${ongData.type || 'N/A'}<br>
+                        <strong style="color: #555;">🏙 Municipio:</strong> ${ongData.municipio || 'N/A'}<br>
+                        <strong style="color: #555;">⚠ Riesgo:</strong> ${ongData.riesgo_nivel || 'N/A'}<br>
+                        ${ongData.distancia_desde_anterior ? 
+                            <strong style="color: #555;">📏 Distancia desde anterior:</strong> ${ongData.distancia_desde_anterior.toFixed(1)} km<br> : ''}
+                        ${ongData.distancia_acumulada ? 
+                            <strong style="color: #555;">🛣 Distancia acumulada:</strong> ${ongData.distancia_acumulada.toFixed(1)} km : ''}
+                    </div>
+                    <div style="margin-top: 8px; font-size: 12px; color: #777;">
+                        Coord: ${ongData.lat.toFixed(4)}°, ${ongData.lon.toFixed(4)}°
+                    </div>
                 </div>
             `;
             
@@ -455,7 +574,7 @@ HTML_GOOGLE_MAPS = """
 
         async function cargarDatos() {
             try {
-                const response = await fetch(`/api/calcular-ruta?lat=${initialLat}&lon=${initialLon}`);
+                const response = await fetch(/api/calcular-ruta?lat=${initialLat}&lon=${initialLon});
                 const data = await response.json();
 
                 document.getElementById("loading").style.display = "none";
@@ -474,36 +593,118 @@ HTML_GOOGLE_MAPS = """
 
                 const ruta = data.ruta_secuencial;
                 if (ruta && ruta.length > 0) {
+                    // Calcular distancias para cada tramo
+                    const rutaConDistancias = [];
+                    let distanciaAcumulada = 0;
+                    let distanciaTotal = 0;
+                    let riesgoCount = {Bajo:0, Medio:0, Alto:0, Desconocido:0};
                     
+                    // Distancia del usuario a la primera ONG
+                    const userPos = {lat: initialLat, lng: initialLon};
+                    const primeraOngPos = {lat: ruta[0].lat, lng: ruta[0].lon};
+                    const distanciaInicial = calcularDistanciaEntrePuntos(userPos, primeraOngPos);
+                    
+                    // Primera ONG
+                    rutaConDistancias.push({
+                        ...ruta[0],
+                        distancia_desde_anterior: distanciaInicial,
+                        distancia_acumulada: distanciaInicial
+                    });
+                    distanciaAcumulada = distanciaInicial;
+                    distanciaTotal += distanciaInicial;
+                    
+                    // Calcular riesgo para estadísticas
+                    const riesgo = ruta[0].riesgo_nivel || 'Desconocido';
+                    if (riesgoCount.hasOwnProperty(riesgo)) riesgoCount[riesgo]++;
+
+                    // ONGs siguientes
+                    for (let i = 1; i < ruta.length; i++) {
+                        const puntoAnterior = {lat: ruta[i-1].lat, lng: ruta[i-1].lon};
+                        const puntoActual = {lat: ruta[i].lat, lng: ruta[i].lon};
+                        const distanciaTramo = calcularDistanciaEntrePuntos(puntoAnterior, puntoActual);
+                        
+                        distanciaAcumulada += distanciaTramo;
+                        distanciaTotal += distanciaTramo;
+                        
+                        rutaConDistancias.push({
+                            ...ruta[i],
+                            distancia_desde_anterior: distanciaTramo,
+                            distancia_acumulada: distanciaAcumulada
+                        });
+                        
+                        const riesgo = ruta[i].riesgo_nivel || 'Desconocido';
+                        if (riesgoCount.hasOwnProperty(riesgo)) riesgoCount[riesgo]++;
+                    }
+                    
+                    routeWithDistances = rutaConDistancias;
+
+                    // Actualizar información principal
                     document.getElementById("start-name").innerText = ruta[0].name;
+                    document.getElementById("start-distance").innerHTML = 
+                        📍 ${distanciaInicial.toFixed(1)} km desde tu ubicación;
+                    
                     document.getElementById("end-name").innerText = ruta[ruta.length - 1].name;
-                    document.getElementById("total-stops").innerText = ruta.length;
+                    document.getElementById("total-distance").innerHTML = 
+                        🛣 Distancia total: <span class="highlight">${distanciaTotal.toFixed(1)} km</span>;
                     
-                    // --- AQUÍ ESTÁ EL CAMBIO PRINCIPAL (JS) ---
+                    document.getElementById("stat-stops").innerText = ruta.length;
+                    document.getElementById("stat-distance").innerText = ${distanciaTotal.toFixed(1)} km;
+                    document.getElementById("stat-avg-distance").innerText = 
+                        ${(distanciaTotal / Math.max(1, ruta.length - 1)).toFixed(1)} km;
+                    
+                    // Calcular riesgo promedio
+                    const riesgoPromedio = calcularRiesgoPromedio(riesgoCount);
+                    document.getElementById("stat-avg-risk").innerText = riesgoPromedio;
+
+                    // Mostrar lista detallada de la ruta
                     const routeListEl = document.getElementById("route-list");
-                    routeListEl.innerHTML = ""; // Limpiar
+                    routeListEl.innerHTML = "";
                     
-                    ruta.forEach((ong, index) => {
+                    rutaConDistancias.forEach((ong, index) => {
+                        const riesgoText = riskTextMap[ong.riesgo_nivel] || riskTextMap['Desconocido'];
+                        const riesgoClass = ong.riesgo_nivel === 'Alto' ? 'risk-high' : 
+                                           ong.riesgo_nivel === 'Medio' ? 'risk-medium' : 
+                                           ong.riesgo_nivel === 'Bajo' ? 'risk-low' : '';
+                        
                         const itemHtml = `
                             <div class="route-item">
-                                <div class="route-item-name">${index + 1}. ${ong.name}</div>
+                                <div class="route-item-header">
+                                    <div class="route-item-name">${index + 1}. ${ong.name}</div>
+                                    <div class="route-item-distance">${ong.distancia_desde_anterior.toFixed(1)} km</div>
+                                </div>
                                 <div class="route-item-details">
-                                    Tipo: ${ong.type || 'N/A'} <br>
-                                    Ubicación: ${ong.municipio || 'N/A'}
+                                    <div>
+                                        <div class="detail-label">Tipo</div>
+                                        <div class="detail-value">${ong.type || 'N/A'}</div>
+                                    </div>
+                                    <div>
+                                        <div class="detail-label">Municipio</div>
+                                        <div class="detail-value">${ong.municipio || 'N/A'}</div>
+                                    </div>
+                                    <div>
+                                        <div class="detail-label">Riesgo</div>
+                                        <div class="detail-value ${riesgoClass}">${riesgoText}</div>
+                                    </div>
+                                    <div>
+                                        <div class="detail-label">Acumulado</div>
+                                        <div class="detail-value">${ong.distancia_acumulada.toFixed(1)} km</div>
+                                    </div>
                                 </div>
                             </div>
                         `;
                         routeListEl.insertAdjacentHTML('beforeend', itemHtml);
                     });
-                    // ------------------------------------------
 
+                    // Mostrar caja de información automáticamente
                     document.getElementById("toggle-btn").click();
 
-                    ruta.forEach(ong => {
-                         crearMarcador(ong, null, 1.3);
+                    // Crear marcadores para la ruta (más grandes)
+                    rutaConDistancias.forEach(ong => {
+                        crearMarcador(ong, null, 1.3);
                     });
 
-                    trazarRutaConColores({ lat: initialLat, lng: initialLon }, ruta);
+                    // Trazar la ruta en el mapa
+                    trazarRutaConColores({ lat: initialLat, lng: initialLon }, rutaConDistancias);
                 }
 
             } catch (e) {
@@ -512,35 +713,37 @@ HTML_GOOGLE_MAPS = """
             }
         }
 
+        function calcularRiesgoPromedio(riesgoCount) {
+            const total = riesgoCount.Bajo + riesgoCount.Medio + riesgoCount.Alto + riesgoCount.Desconocido;
+            if (total === 0) return "-";
+            
+            // Ponderar riesgos (Bajo=1, Medio=2, Alto=3)
+            const score = (riesgoCount.Bajo * 1 + riesgoCount.Medio * 2 + riesgoCount.Alto * 3) / total;
+            
+            if (score < 1.5) return "🟢 Bajo";
+            if (score < 2.5) return "🟡 Medio";
+            return "🔴 Alto";
+        }
+
         async function trazarRutaConColores(origenUsuario, listaOngs) {
             if (!listaOngs || listaOngs.length === 0) return;
 
-            // 1. Preparamos todos los puntos en una sola lista maestra
-            // [Usuario, ONG1, ONG2, ..., ONG_Final]
             const todosLosPuntos = [
                 origenUsuario, 
                 ...listaOngs.map(ong => ({ lat: ong.lat, lng: ong.lon }))
             ];
 
-            const MAX_WAYPOINTS_PER_REQUEST = 23; 
-            // Google permite 25 puntos en total: 1 Origen + 1 Destino + 23 Waypoints
-            
+            const MAX_WAYPOINTS_PER_REQUEST = 23;
             const peticiones = [];
-
-            // 2. Iteramos creando "batches" (lotes)
-            // Avanzamos de 23 en 23, pero asegurando solapamiento (el fin de uno es el inicio del otro)
             let indexActual = 0;
 
             while (indexActual < todosLosPuntos.length - 1) {
-                // Definir el lote actual
                 const inicioBatch = indexActual;
-                // El destino es el actual + 23 (waypoints) + 1 (destino final del tramo)
                 const finBatch = Math.min(indexActual + MAX_WAYPOINTS_PER_REQUEST + 1, todosLosPuntos.length - 1);
 
                 const puntoOrigen = todosLosPuntos[inicioBatch];
                 const puntoDestino = todosLosPuntos[finBatch];
                 
-                // Los waypoints son todo lo que hay EN MEDIO de origen y destino
                 const waypointsBatch = [];
                 for (let i = inicioBatch + 1; i < finBatch; i++) {
                     waypointsBatch.push({
@@ -549,8 +752,6 @@ HTML_GOOGLE_MAPS = """
                     });
                 }
 
-                // Preparamos la promesa para este tramo
-                // Guardamos 'inicioBatch' para saber qué colores pintar después
                 const promesa = new Promise((resolve, reject) => {
                     const request = {
                         origin: puntoOrigen,
@@ -560,32 +761,23 @@ HTML_GOOGLE_MAPS = """
                         travelMode: google.maps.TravelMode.DRIVING
                     };
 
-                    // Capturamos el índice base para pasarlo al renderizador de colores
-                    const baseIndexParaColores = inicioBatch; 
+                    const baseIndexParaColores = inicioBatch;
 
                     directionsService.route(request, function(result, status) {
                         if (status === google.maps.DirectionsStatus.OK) {
-                            // Importante: No usamos setDirections estándar porque borraría los tramos anteriores
-                            // directionsRenderer.setDirections(result); <--- NO USAR ESTO
-                            
-                            // Renderizamos manualmente las líneas de colores
                             renderColoredLegs(result, listaOngs, baseIndexParaColores);
                             resolve();
                         } else {
                             console.error("Fallo en tramo " + baseIndexParaColores + ": " + status);
-                            // Resolvemos aunque falle para que no bloquee otros tramos
-                            resolve(); 
+                            resolve();
                         }
                     });
                 });
 
                 peticiones.push(promesa);
-
-                // El siguiente batch debe empezar donde terminó este para que la linea sea continua
                 indexActual = finBatch;
             }
 
-            // 3. Ejecutamos todas las peticiones
             await Promise.all(peticiones);
         }
 
@@ -594,16 +786,8 @@ HTML_GOOGLE_MAPS = """
             
             for (let i = 0; i < legs.length; i++) {
                 const leg = legs[i];
-                let colorTramo = riskColorMap['Desconocido'];
-                
-                // CALCULO DEL ÍNDICE REAL EN LA LISTA GLOBAL
-                // El 'offsetIndex' es donde empezó este batch en la lista global de puntos.
-                // i es el paso dentro de este batch.
-                // Nota: rutaSecuencial[0] es la primera ONG.
-                // El primer tramo del mapa va de (Usuario -> ONG0).
-                // Por tanto, el leg[0] del primer batch corresponde a rutaSecuencial[0].
-                
                 const indiceGlobal = offsetIndex + i;
+                let colorTramo = riskColorMap['Desconocido'];
 
                 if (indiceGlobal < rutaSecuencial.length) {
                     const nodoDestino = rutaSecuencial[indiceGlobal];
@@ -627,7 +811,6 @@ HTML_GOOGLE_MAPS = """
                 });
                 legPolyline.setPath(path);
                 
-                // Guardamos referencia por si quieres borrarlas luego
                 routePolylines.push(legPolyline);
             }
         }
